@@ -8,9 +8,8 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/darenliang/scaled-scheduler-go/lib"
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
-	"go.uber.org/zap"
-
 	"github.com/darenliang/scaled-scheduler-go/lib/scheduler"
+	"go.uber.org/zap"
 )
 
 var (
@@ -45,7 +44,7 @@ func main() {
 
 	s, err := scheduler.NewScheduler(ctx, *address, *perWorkerQueueSize, *workerTimeout, *functionRetention)
 	if err != nil {
-		panic(err)
+		logging.Logger.Fatal(err)
 	}
 	s.Run()
 }

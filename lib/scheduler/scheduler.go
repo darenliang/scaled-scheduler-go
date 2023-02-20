@@ -7,12 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/panjf2000/ants/v2"
-
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
 	"github.com/darenliang/scaled-scheduler-go/lib/protocol"
 	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/managers"
 	"github.com/google/uuid"
+	"github.com/panjf2000/ants/v2"
 	"github.com/zeromq/goczmq"
 )
 
@@ -92,15 +91,22 @@ func NewScheduler(
 func (s *Scheduler) Run() {
 	logging.Logger.Info("scheduler started")
 
+	pool, err := ants.NewPool(ants.DefaultAntsPoolSize)
+	if err != nil {
+		logging.Logger.Fatal(err)
+	}
 	for {
 		select {
 		case msg := <-s.router.RecvChan:
-			ants.Submit(func() { s.HandleMessage(msg) })
+			err := pool.Submit(func() { s.HandleMessage(msg) })
+			if err != nil {
+				logging.Logger.Error(err)
+			}
 		case err := <-s.router.ErrChan:
 			logging.Logger.Error(err)
 		case <-s.ctx.Done():
 			s.cancel()
-			ants.Release()
+			pool.Release()
 			s.wg.Wait()
 			s.router.Destroy()
 			logging.Logger.Info("scheduler exited")
