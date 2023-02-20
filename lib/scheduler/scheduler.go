@@ -95,6 +95,8 @@ func (s *Scheduler) Run() {
 		select {
 		case msg := <-s.router.RecvChan:
 			ants.Submit(func() { s.HandleMessage(msg) })
+		case err := <-s.router.ErrChan:
+			logging.Logger.Error(err)
 		case <-s.ctx.Done():
 			s.cancel()
 			ants.Release()
