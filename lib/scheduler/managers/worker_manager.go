@@ -84,7 +84,10 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 			}
 
 			m.workerIDQueueLock.Unlock()
+
+			// make go runtime switch contexts
 			runtime.Gosched()
+
 			m.workerIDQueueLock.Lock()
 		}
 

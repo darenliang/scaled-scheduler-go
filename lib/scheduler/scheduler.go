@@ -49,6 +49,7 @@ func NewScheduler(
 		goczmq.SockSetRcvhwm(0),
 	)
 
+	// create context to cancel background goroutines
 	ctx, cancel := context.WithCancel(ctx)
 	wg := &sync.WaitGroup{}
 
