@@ -5,6 +5,7 @@ on:
     tags:
       - "*"
 
+jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -24,9 +25,8 @@ on:
         with:
           name: scaled-scheduler-go-linux
           path: scaled-scheduler-go
-
   release:
-    needs: [ build-windows, build-linux, build-macos ]
+    needs: [ build-linux ]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,7 +36,7 @@ on:
         with:
           name: scaled-scheduler-go-linux
       - name: Tar Gzip Linux release
-        run: tar -czvf scaled_scheduler_go_${{github.ref_name}}_linux_amd64.tar.gz dsfs README.md LICENSE
+        run: tar -czvf scaled_scheduler_go_${{github.ref_name}}_linux_amd64.tar.gz scaled-scheduler-go README.md LICENSE
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
