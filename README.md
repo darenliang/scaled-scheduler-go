@@ -3,8 +3,8 @@
 This scheduler implements the protocol used in [scaled](https://github.com/yzard/scaled), making it a drop-in
 replacement for scaled's Python scheduler.
 
-> :warning: The scaled scheduler protocol is not fixed and is subject
-> to change. This scheduler doesn't fully implement the protocol and may have bugs.
+> :warning: This scheduler doesn't fully implement the protocol and may have bugs.
+> The scaled scheduler protocol is subject to change so there may be compatibility issues.
 
 ## Dependencies
 
