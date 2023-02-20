@@ -41,10 +41,13 @@ func NewScheduler(
 		return nil, err
 	}
 
-	router := utils.NewRouterChanneler(
+	router, err := utils.NewRouterChanneler(
 		address,
 		fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String()),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// create context to cancel background goroutines
 	ctx, cancel := context.WithCancel(ctx)
@@ -93,6 +96,7 @@ func (s *Scheduler) Run() {
 	if err != nil {
 		logging.Logger.Fatal(err)
 	}
+
 	for {
 		select {
 		case msg := <-s.router.RecvCh:

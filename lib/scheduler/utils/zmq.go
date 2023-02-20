@@ -8,31 +8,90 @@ import (
 )
 
 type RouterChanneler struct {
-	identity string
-	id       string
-	endpoint string
-	closeCh  chan struct{}
-	closed   bool
-	SendCh   chan [][]byte
-	RecvCh   chan [][]byte
-	ErrCh    chan error
+	SendCh  chan [][]byte
+	RecvCh  chan [][]byte
+	ErrCh   chan error
+	closeCh chan struct{}
+	closed  bool
 }
 
-func NewRouterChanneler(endpoint string, identity string) *RouterChanneler {
-	rc := &RouterChanneler{
-		identity: identity,
-		id:       uuid.New().String(),
-		endpoint: endpoint,
-		closeCh:  make(chan struct{}, 1),
-		SendCh:   make(chan [][]byte),
-		RecvCh:   make(chan [][]byte),
-		ErrCh:    make(chan error),
+func NewRouterChanneler(endpoint string, identity string) (*RouterChanneler, error) {
+	// unique identifier used by inproc sockets
+	id := uuid.New().String()
+
+	// create router socket to receive and send messages
+	routerSocket, err := zmq4.NewSocket(zmq4.ROUTER)
+	if err != nil {
+		return nil, err
+	}
+	err = routerSocket.SetIdentity(identity)
+	if err != nil {
+		return nil, err
+	}
+	err = routerSocket.SetSndhwm(0)
+	if err != nil {
+		return nil, err
+	}
+	err = routerSocket.SetRcvhwm(0)
+	if err != nil {
+		return nil, err
+	}
+	err = routerSocket.Bind(endpoint)
+	if err != nil {
+		return nil, err
 	}
 
-	go rc.socketHandler()
-	go rc.messagePusher()
+	// create pull socket to process message sending requests
+	pullMsgSocket, err := zmq4.NewSocket(zmq4.PULL)
+	if err != nil {
+		return nil, err
+	}
+	err = pullMsgSocket.Bind(fmt.Sprintf("inproc://proxy_%s", id))
+	if err != nil {
+		return nil, err
+	}
 
-	return rc
+	// create push socket to send message sending requests
+	pushMsgSocket, err := zmq4.NewSocket(zmq4.PUSH)
+	if err != nil {
+		return nil, err
+	}
+	err = pushMsgSocket.Connect(fmt.Sprintf("inproc://proxy_%s", id))
+	if err != nil {
+		return nil, err
+	}
+
+	// create pull socket to process close requests
+	pullCloseSocket, err := zmq4.NewSocket(zmq4.PULL)
+	if err != nil {
+		return nil, err
+	}
+	err = pullCloseSocket.Bind(fmt.Sprintf("inproc://close_%s", id))
+	if err != nil {
+		return nil, err
+	}
+
+	// create push socket to send close requests
+	pushCloseSocket, err := zmq4.NewSocket(zmq4.PUSH)
+	if err != nil {
+		return nil, err
+	}
+	err = pushCloseSocket.Connect(fmt.Sprintf("inproc://close_%s", id))
+	if err != nil {
+		return nil, err
+	}
+
+	rc := &RouterChanneler{
+		SendCh:  make(chan [][]byte),
+		RecvCh:  make(chan [][]byte),
+		ErrCh:   make(chan error),
+		closeCh: make(chan struct{}, 1),
+	}
+
+	go rc.socketHandler(routerSocket, pullMsgSocket, pullCloseSocket)
+	go rc.messagePusher(pushMsgSocket, pushCloseSocket)
+
+	return rc, nil
 }
 
 func (rc *RouterChanneler) Close() {
@@ -42,67 +101,15 @@ func (rc *RouterChanneler) Close() {
 	rc.closeCh <- struct{}{}
 }
 
-func (rc *RouterChanneler) socketHandler() {
-	defer close(rc.RecvCh)
-
-	// create router socket to receive messages
-	routerSocket, err := zmq4.NewSocket(zmq4.ROUTER)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = routerSocket.SetIdentity(rc.identity)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = routerSocket.SetSndhwm(0)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = routerSocket.SetRcvhwm(0)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = routerSocket.Bind(rc.endpoint)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
+func (rc *RouterChanneler) socketHandler(routerSocket, pullMsgSocket, pullCloseSocket *zmq4.Socket) {
 	defer routerSocket.Close()
-
-	// create pull socket to proxy messages from message pusher
-	proxySocket, err := zmq4.NewSocket(zmq4.PULL)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = proxySocket.Bind(fmt.Sprintf("inproc://proxy_%s", rc.id))
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	defer proxySocket.Close()
-
-	// create pair socket to receive a close message
-	closeSocket, err := zmq4.NewSocket(zmq4.PAIR)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = closeSocket.Bind(fmt.Sprintf("inproc://close_%s", rc.id))
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	defer closeSocket.Close()
+	defer pullMsgSocket.Close()
+	defer pullCloseSocket.Close()
 
 	poller := zmq4.NewPoller()
 	poller.Add(routerSocket, zmq4.POLLIN)
-	poller.Add(proxySocket, zmq4.POLLIN)
-	poller.Add(closeSocket, zmq4.POLLIN)
+	poller.Add(pullMsgSocket, zmq4.POLLIN)
+	poller.Add(pullCloseSocket, zmq4.POLLIN)
 	for {
 		sockets, err := poller.Poll(-1)
 		if err != nil {
@@ -120,8 +127,8 @@ func (rc *RouterChanneler) socketHandler() {
 				}
 				rc.RecvCh <- msg
 
-			case proxySocket:
-				msg, err := proxySocket.RecvMessageBytes(0)
+			case pullMsgSocket:
+				msg, err := pullMsgSocket.RecvMessageBytes(0)
 				if err != nil {
 					rc.ErrCh <- err
 					continue
@@ -133,50 +140,27 @@ func (rc *RouterChanneler) socketHandler() {
 					continue
 				}
 
-			case closeSocket:
+			case pullCloseSocket:
 				return
 			}
 		}
 	}
 }
 
-func (rc *RouterChanneler) messagePusher() {
-	// create push socket to send messages to socket handler
-	proxySocket, err := zmq4.NewSocket(zmq4.PUSH)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = proxySocket.Connect(fmt.Sprintf("inproc://proxy_%s", rc.id))
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	defer proxySocket.Close()
-
-	// create pair socket to emit close messages
-	closeSocket, err := zmq4.NewSocket(zmq4.PAIR)
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	err = closeSocket.Connect(fmt.Sprintf("inproc://close_%s", rc.id))
-	if err != nil {
-		rc.ErrCh <- err
-		return
-	}
-	defer closeSocket.Close()
+func (rc *RouterChanneler) messagePusher(pushMsgSocket, pushCloseSocket *zmq4.Socket) {
+	defer pushMsgSocket.Close()
+	defer pushCloseSocket.Close()
 
 	for {
 		select {
 		case msg := <-rc.SendCh:
-			_, err := proxySocket.SendMessage(msg)
+			_, err := pushMsgSocket.SendMessage(msg)
 			if err != nil {
 				rc.ErrCh <- err
 			}
 		case <-rc.closeCh:
 			rc.closed = true
-			_, err := closeSocket.SendMessage("")
+			_, err := pushCloseSocket.SendMessage("")
 			if err != nil {
 				rc.ErrCh <- err
 			}
