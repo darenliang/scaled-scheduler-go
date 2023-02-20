@@ -7,7 +7,7 @@ import (
 
 var Logger *zap.SugaredLogger
 
-func InitLogger(level zapcore.Level) {
+func InitLogger(level zapcore.LevelEnabler) {
 	logger, err := zap.NewDevelopment(zap.IncreaseLevel(level))
 	if err != nil {
 		panic(err)

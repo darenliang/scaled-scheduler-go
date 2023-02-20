@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/panjf2000/ants/v2 v2.7.1
-	github.com/zeromq/goczmq v0.0.0-20190622112907-4715d4da6d4b
+	github.com/pebbe/zmq4 v1.2.9
 	go.uber.org/zap v1.24.0
 )
 

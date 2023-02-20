@@ -10,9 +10,9 @@ import (
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
 	"github.com/darenliang/scaled-scheduler-go/lib/protocol"
 	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/managers"
+	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/utils"
 	"github.com/google/uuid"
 	"github.com/panjf2000/ants/v2"
-	"github.com/zeromq/goczmq"
 )
 
 type Scheduler struct {
@@ -23,7 +23,7 @@ type Scheduler struct {
 	ctx                   context.Context
 	wg                    *sync.WaitGroup
 	cancel                context.CancelFunc
-	router                *goczmq.Channeler
+	router                *utils.RouterChanneler
 	clientManager         *managers.ClientManager
 	functionManager       *managers.FunctionManager
 	workerManager         *managers.WorkerManager
@@ -41,11 +41,9 @@ func NewScheduler(
 		return nil, err
 	}
 
-	router := goczmq.NewRouterChanneler(
+	router := utils.NewRouterChanneler(
 		address,
-		goczmq.SockSetIdentity(fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String())),
-		goczmq.SockSetSndhwm(0),
-		goczmq.SockSetRcvhwm(0),
+		fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String()),
 	)
 
 	// create context to cancel background goroutines
@@ -53,17 +51,17 @@ func NewScheduler(
 	wg := &sync.WaitGroup{}
 
 	// initialize managers
-	clientManager := managers.NewClientManager(router.SendChan)
+	clientManager := managers.NewClientManager(router.SendCh)
 
-	functionManager := managers.NewFunctionManager(router.SendChan, functionRetentionTime)
+	functionManager := managers.NewFunctionManager(router.SendCh, functionRetentionTime)
 	go functionManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	workerManager := managers.NewWorkerManager(router.SendChan, perWorkerQueueSize, workerTimeout)
+	workerManager := managers.NewWorkerManager(router.SendCh, perWorkerQueueSize, workerTimeout)
 	go workerManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	taskManager := managers.NewTaskManager(router.SendChan)
+	taskManager := managers.NewTaskManager(router.SendCh)
 	go taskManager.RunTaskAssignLoop(ctx, wg)
 	wg.Add(1)
 
@@ -97,18 +95,18 @@ func (s *Scheduler) Run() {
 	}
 	for {
 		select {
-		case msg := <-s.router.RecvChan:
+		case msg := <-s.router.RecvCh:
 			err := pool.Submit(func() { s.HandleMessage(msg) })
 			if err != nil {
 				logging.Logger.Error(err)
 			}
-		case err := <-s.router.ErrChan:
+		case err := <-s.router.ErrCh:
 			logging.Logger.Error(err)
 		case <-s.ctx.Done():
 			s.cancel()
 			pool.Release()
 			s.wg.Wait()
-			s.router.Destroy()
+			s.router.Close()
 			logging.Logger.Info("scheduler exited")
 			return
 		}
