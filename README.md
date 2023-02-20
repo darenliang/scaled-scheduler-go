@@ -8,9 +8,7 @@ replacement for scaled's Python scheduler.
 
 ## Dependencies
 
-- [libsodium](https://github.com/jedisct1/libsodium)
 - [libzmq](https://github.com/zeromq/libzmq)
-- [czmq](https://github.com/zeromq/czmq)
 
 ## Building
 
