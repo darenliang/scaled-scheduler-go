@@ -19,7 +19,7 @@ type WorkerManager struct {
 	workerTimeout        time.Duration
 	taskManager          *TaskManager
 	workerIDToAliveSince cmap.ConcurrentMap[string, time.Time]
-	workerIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, bool]]
+	workerIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
 	taskIDToWorkerID     cmap.ConcurrentMap[string, string]
 	workerIDQueue        *utils.WorkerHeap
 	workerIDQueueLock    sync.Mutex
@@ -31,7 +31,7 @@ func NewWorkerManager(sendChan chan<- [][]byte, perWorkerQueueSize int, workerTi
 		perWorkerQueueSize:   perWorkerQueueSize,
 		workerTimeout:        workerTimeout,
 		workerIDToAliveSince: cmap.New[time.Time](),
-		workerIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, bool]](),
+		workerIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
 		taskIDToWorkerID:     cmap.New[string](),
 		workerIDQueue:        utils.NewWorkerHeap(),
 	}
@@ -48,7 +48,7 @@ func (m *WorkerManager) OnHeartbeat(workerID string) {
 		func(ok bool, _ time.Time, newValue time.Time) time.Time {
 			if !ok {
 				logging.Logger.Infof("worker %s connected", workerID)
-				m.workerIDToTaskIDs.Set(workerID, cmap.New[bool]())
+				m.workerIDToTaskIDs.Set(workerID, cmap.New[struct{}]())
 				m.workerIDQueueLock.Lock()
 				heap.Push(m.workerIDQueue, &utils.WorkerHeapEntry{WorkerID: workerID, Tasks: 0})
 				m.workerIDQueueLock.Unlock()
@@ -101,7 +101,7 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 	if !ok {
 		return protocol.ErrWorkerNotFound
 	}
-	taskIDs.Set(task.TaskID, true)
+	taskIDs.Set(task.TaskID, struct{}{})
 	m.taskIDToWorkerID.Set(task.TaskID, workerID)
 	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTask, task)
 
@@ -162,7 +162,7 @@ func (m *WorkerManager) RunGC(ctx context.Context, wg *sync.WaitGroup) {
 
 				taskIDs, ok := m.workerIDToTaskIDs.Pop(workerID)
 				if ok {
-					taskIDs.IterCb(func(taskID string, _ bool) {
+					taskIDs.IterCb(func(taskID string, _ struct{}) {
 						m.taskIDToWorkerID.Remove(taskID)
 						m.taskManager.OnTaskReroute(taskID)
 					})

@@ -24,17 +24,17 @@ const (
 	MessageTypeMonitoringResponse MessageType = "MS"
 )
 
-var MessageTypeSet = map[MessageType]bool{
-	MessageTypeTask:               true,
-	MessageTypeTaskEcho:           true,
-	MessageTypeTaskCancel:         true,
-	MessageTypeTaskCancelEcho:     true,
-	MessageTypeTaskResult:         true,
-	MessageTypeHeartbeat:          true,
-	MessageTypeFunctionRequest:    true,
-	MessageTypeFunctionResponse:   true,
-	MessageTypeMonitoringRequest:  true,
-	MessageTypeMonitoringResponse: true,
+var MessageTypeSet = map[MessageType]struct{}{
+	MessageTypeTask:               {},
+	MessageTypeTaskEcho:           {},
+	MessageTypeTaskCancel:         {},
+	MessageTypeTaskCancelEcho:     {},
+	MessageTypeTaskResult:         {},
+	MessageTypeHeartbeat:          {},
+	MessageTypeFunctionRequest:    {},
+	MessageTypeFunctionResponse:   {},
+	MessageTypeMonitoringRequest:  {},
+	MessageTypeMonitoringResponse: {},
 }
 
 type TaskStatus string
@@ -49,10 +49,10 @@ const (
 	TaskStatusCanceled TaskStatus = "C"
 )
 
-var TaskStatusSet = map[TaskStatus]bool{
-	TaskStatusSuccess:  true,
-	TaskStatusFailed:   true,
-	TaskStatusCanceled: true,
+var TaskStatusSet = map[TaskStatus]struct{}{
+	TaskStatusSuccess:  {},
+	TaskStatusFailed:   {},
+	TaskStatusCanceled: {},
 }
 
 type TaskEchoStatus string
@@ -68,11 +68,11 @@ const (
 	TaskEchoStatusFunctionNotExists TaskEchoStatus = "FN"
 )
 
-var TaskEchoStatusSet = map[TaskEchoStatus]bool{
-	TaskEchoStatusSubmitOK:          true,
-	TaskEchoStatusCancelOK:          true,
-	TaskEchoStatusDuplicated:        true,
-	TaskEchoStatusFunctionNotExists: true,
+var TaskEchoStatusSet = map[TaskEchoStatus]struct{}{
+	TaskEchoStatusSubmitOK:          {},
+	TaskEchoStatusCancelOK:          {},
+	TaskEchoStatusDuplicated:        {},
+	TaskEchoStatusFunctionNotExists: {},
 }
 
 type FunctionRequestType string
@@ -88,11 +88,11 @@ const (
 	FunctionRequestTypeDelete  FunctionRequestType = "D"
 )
 
-var FunctionRequestTypeSet = map[FunctionRequestType]bool{
-	FunctionRequestTypeCheck:   true,
-	FunctionRequestTypeAdd:     true,
-	FunctionRequestTypeRequest: true,
-	FunctionRequestTypeDelete:  true,
+var FunctionRequestTypeSet = map[FunctionRequestType]struct{}{
+	FunctionRequestTypeCheck:   {},
+	FunctionRequestTypeAdd:     {},
+	FunctionRequestTypeRequest: {},
+	FunctionRequestTypeDelete:  {},
 }
 
 type FunctionResponseType string
@@ -108,11 +108,11 @@ const (
 	FunctionResponseTypeDuplicated    FunctionResponseType = "DC"
 )
 
-var FunctionResponseTypeSet = map[FunctionResponseType]bool{
-	FunctionResponseTypeOK:            true,
-	FunctionResponseTypeNotExists:     true,
-	FunctionResponseTypeStillHaveTask: true,
-	FunctionResponseTypeDuplicated:    true,
+var FunctionResponseTypeSet = map[FunctionResponseType]struct{}{
+	FunctionResponseTypeOK:            {},
+	FunctionResponseTypeNotExists:     {},
+	FunctionResponseTypeStillHaveTask: {},
+	FunctionResponseTypeDuplicated:    {},
 }
 
 type Task struct {
@@ -153,7 +153,7 @@ func DeserializeTaskEcho(data [][]byte) (*TaskEcho, error) {
 		return nil, ErrInvalidDataLength
 	}
 
-	if ok := TaskEchoStatusSet[TaskEchoStatus(data[1])]; !ok {
+	if _, ok := TaskEchoStatusSet[TaskEchoStatus(data[1])]; !ok {
 		return nil, ErrInvalidEnum
 	}
 
@@ -195,7 +195,7 @@ func DeserializeTaskCancelEcho(data [][]byte) (*TaskCancelEcho, error) {
 		return nil, ErrInvalidDataLength
 	}
 
-	if ok := TaskEchoStatusSet[TaskEchoStatus(data[1])]; !ok {
+	if _, ok := TaskEchoStatusSet[TaskEchoStatus(data[1])]; !ok {
 		return nil, ErrInvalidEnum
 	}
 
@@ -208,8 +208,8 @@ func DeserializeTaskCancelEcho(data [][]byte) (*TaskCancelEcho, error) {
 type TaskResult struct {
 	TaskID   string
 	Status   TaskStatus
-	Duration float32
 	Result   []byte
+	Duration float32
 }
 
 func (tr *TaskResult) Serialize() [][]byte {
@@ -223,7 +223,7 @@ func DeserializeTaskResult(data [][]byte) (*TaskResult, error) {
 		return nil, ErrInvalidDataLength
 	}
 
-	if ok := TaskStatusSet[TaskStatus(data[1])]; !ok {
+	if _, ok := TaskStatusSet[TaskStatus(data[1])]; !ok {
 		return nil, ErrInvalidEnum
 	}
 
@@ -290,7 +290,7 @@ func DeserializeFunctionRequest(data [][]byte) (*FunctionRequest, error) {
 		return nil, ErrInvalidDataLength
 	}
 
-	if ok := FunctionRequestTypeSet[FunctionRequestType(data[0])]; !ok {
+	if _, ok := FunctionRequestTypeSet[FunctionRequestType(data[0])]; !ok {
 		return nil, ErrInvalidEnum
 	}
 
@@ -316,7 +316,7 @@ func DeserializeFunctionResponse(data [][]byte) (*FunctionResponse, error) {
 		return nil, ErrInvalidDataLength
 	}
 
-	if ok := FunctionResponseTypeSet[FunctionResponseType(data[0])]; !ok {
+	if _, ok := FunctionResponseTypeSet[FunctionResponseType(data[0])]; !ok {
 		return nil, ErrInvalidEnum
 	}
 

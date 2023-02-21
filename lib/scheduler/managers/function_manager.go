@@ -17,7 +17,7 @@ type FunctionManager struct {
 	functionRetention      time.Duration
 	functionIDToAliveSince cmap.ConcurrentMap[string, time.Time]
 	functionIDToFunction   cmap.ConcurrentMap[string, []byte]
-	functionIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, bool]]
+	functionIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
 }
 
 func NewFunctionManager(sendChan chan<- [][]byte, functionRetention time.Duration) *FunctionManager {
@@ -26,7 +26,7 @@ func NewFunctionManager(sendChan chan<- [][]byte, functionRetention time.Duratio
 		functionRetention:      functionRetention,
 		functionIDToAliveSince: cmap.New[time.Time](),
 		functionIDToFunction:   cmap.New[[]byte](),
-		functionIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, bool]](),
+		functionIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
 	}
 }
 
@@ -40,7 +40,7 @@ func (m *FunctionManager) AddFunction(functionID string, function []byte) error 
 		return protocol.ErrFunctionAlreadyExists
 	}
 	m.functionIDToFunction.Set(functionID, function)
-	m.functionIDToTaskIDs.Set(functionID, cmap.New[bool]())
+	m.functionIDToTaskIDs.Set(functionID, cmap.New[struct{}]())
 	return nil
 }
 
@@ -67,7 +67,7 @@ func (m *FunctionManager) SetTaskUse(taskID, functionID string) error {
 	if !ok {
 		return protocol.ErrFunctionDoesNotExist
 	}
-	taskIDs.Set(taskID, true)
+	taskIDs.Set(taskID, struct{}{})
 	return nil
 }
 

@@ -10,8 +10,8 @@ import (
 )
 
 type TaskQueueEntry struct {
-	ClientID string
 	Task     *protocol.Task
+	ClientID string
 }
 
 type TaskManager struct {
@@ -20,8 +20,8 @@ type TaskManager struct {
 	workerManager       *WorkerManager
 	taskIDToClientID    cmap.ConcurrentMap[string, string]
 	taskIDToTask        cmap.ConcurrentMap[string, *protocol.Task]
-	runningTaskIDs      cmap.ConcurrentMap[string, bool]
-	cancelingTaskIDs    cmap.ConcurrentMap[string, bool]
+	runningTaskIDs      cmap.ConcurrentMap[string, struct{}]
+	cancelingTaskIDs    cmap.ConcurrentMap[string, struct{}]
 	unassignedTaskQueue chan *TaskQueueEntry
 }
 
@@ -30,8 +30,8 @@ func NewTaskManager(sendChan chan<- [][]byte) *TaskManager {
 		sendChan:            sendChan,
 		taskIDToClientID:    cmap.New[string](),
 		taskIDToTask:        cmap.New[*protocol.Task](),
-		runningTaskIDs:      cmap.New[bool](),
-		cancelingTaskIDs:    cmap.New[bool](),
+		runningTaskIDs:      cmap.New[struct{}](),
+		cancelingTaskIDs:    cmap.New[struct{}](),
 		unassignedTaskQueue: make(chan *TaskQueueEntry),
 	}
 }
@@ -108,7 +108,7 @@ func (m *TaskManager) OnTaskCancel(clientID, taskID string) error {
 		return nil
 	}
 
-	m.cancelingTaskIDs.Set(taskID, true)
+	m.cancelingTaskIDs.Set(taskID, struct{}{})
 	m.runningTaskIDs.Remove(taskID)
 
 	m.sendChan <- protocol.PackMessage(
@@ -145,7 +145,7 @@ func (m *TaskManager) OnAssignTask(ctx context.Context, entry *TaskQueueEntry) e
 	}
 	m.taskIDToClientID.Set(entry.Task.TaskID, entry.ClientID)
 	m.taskIDToTask.Set(entry.Task.TaskID, entry.Task)
-	m.runningTaskIDs.Set(entry.Task.TaskID, true)
+	m.runningTaskIDs.Set(entry.Task.TaskID, struct{}{})
 
 	return nil
 }
