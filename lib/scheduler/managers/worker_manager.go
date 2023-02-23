@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/marusama/semaphore/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
@@ -15,6 +16,7 @@ import (
 
 type WorkerManager struct {
 	sendChan             chan<- [][]byte
+	sentStatistics       *utils.MessageTypeStatistics
 	perWorkerQueueSize   int
 	workerTimeout        time.Duration
 	taskManager          *TaskManager
@@ -26,9 +28,15 @@ type WorkerManager struct {
 	workerQueueSemaphore semaphore.Semaphore
 }
 
-func NewWorkerManager(sendChan chan<- [][]byte, perWorkerQueueSize int, workerTimeout time.Duration) *WorkerManager {
+func NewWorkerManager(
+	sendChan chan<- [][]byte,
+	sentStatistics *utils.MessageTypeStatistics,
+	perWorkerQueueSize int,
+	workerTimeout time.Duration,
+) *WorkerManager {
 	return &WorkerManager{
 		sendChan:             sendChan,
+		sentStatistics:       sentStatistics,
 		perWorkerQueueSize:   perWorkerQueueSize,
 		workerTimeout:        workerTimeout,
 		workerIDToAliveSince: cmap.New[time.Time](),
@@ -36,6 +44,17 @@ func NewWorkerManager(sendChan chan<- [][]byte, perWorkerQueueSize int, workerTi
 		taskIDToWorkerID:     cmap.New[string](),
 		workerQueue:          utils.NewWorkerHeap(),
 		workerQueueSemaphore: semaphore.New(0),
+	}
+}
+
+func (m *WorkerManager) GetStatistics() *utils.WorkerManagerStatistics {
+	workerToTasks := make(map[string]uint64)
+	m.workerIDToTaskIDs.IterCb(func(k string, v cmap.ConcurrentMap[string, struct{}]) {
+		workerToTasks[k] = uint64(v.Count())
+	})
+	return &utils.WorkerManagerStatistics{
+		Type:          "priority_queue",
+		WorkerToTasks: workerToTasks,
 	}
 }
 
@@ -94,6 +113,7 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 
 	m.taskIDToWorkerID.Set(task.TaskID, workerID)
 	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTask, task)
+	atomic.AddUint64(&m.sentStatistics.Task, 1)
 
 	return nil
 }
@@ -103,7 +123,10 @@ func (m *WorkerManager) OnTaskCancel(taskID string) error {
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTaskCancel, &protocol.TaskCancel{TaskID: taskID})
+	atomic.AddUint64(&m.sentStatistics.TaskCancel, 1)
+
 	return nil
 }
 
@@ -112,6 +135,7 @@ func (m *WorkerManager) OnTaskDone(taskResult *protocol.TaskResult) error {
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	taskIDs, ok := m.workerIDToTaskIDs.Get(workerID)
 	if !ok {
 		return protocol.ErrWorkerNotFound

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
@@ -14,20 +15,35 @@ import (
 
 type FunctionManager struct {
 	sendChan               chan<- [][]byte
+	sentStatistics         *utils.MessageTypeStatistics
 	functionRetention      time.Duration
 	functionIDToAliveSince cmap.ConcurrentMap[string, time.Time]
 	functionIDToFunction   cmap.ConcurrentMap[string, []byte]
 	functionIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
 }
 
-func NewFunctionManager(sendChan chan<- [][]byte, functionRetention time.Duration) *FunctionManager {
+func NewFunctionManager(
+	sendChan chan<- [][]byte,
+	sentStatistics *utils.MessageTypeStatistics,
+	functionRetention time.Duration,
+) *FunctionManager {
 	return &FunctionManager{
 		sendChan:               sendChan,
+		sentStatistics:         sentStatistics,
 		functionRetention:      functionRetention,
 		functionIDToAliveSince: cmap.New[time.Time](),
 		functionIDToFunction:   cmap.New[[]byte](),
 		functionIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
 	}
+}
+
+func (m *FunctionManager) GetStatistics() *utils.FunctionManagerStatistics {
+	functionIDToTasks := make(map[string]uint64)
+	m.functionIDToTaskIDs.IterCb(func(k string, v cmap.ConcurrentMap[string, struct{}]) {
+		functionIDToTasks[k] = uint64(v.Count())
+	})
+
+	return &utils.FunctionManagerStatistics{FunctionIDToTasks: functionIDToTasks}
 }
 
 func (m *FunctionManager) HasFunction(functionID string) bool {
@@ -39,8 +55,10 @@ func (m *FunctionManager) AddFunction(functionID string, function []byte) error 
 	if m.HasFunction(functionID) {
 		return protocol.ErrFunctionAlreadyExists
 	}
+
 	m.functionIDToFunction.Set(functionID, function)
 	m.functionIDToTaskIDs.Set(functionID, cmap.New[struct{}]())
+
 	return nil
 }
 
@@ -48,35 +66,45 @@ func (m *FunctionManager) RemoveFunction(functionID string) error {
 	if !m.HasFunction(functionID) {
 		return protocol.ErrFunctionDoesNotExist
 	}
+
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
 	if !ok {
 		return protocol.ErrFunctionDoesNotExist
 	}
+
 	if taskIDs.Count() != 0 {
 		return protocol.ErrFunctionStillHaveTasks
 	}
+
 	m.functionIDToAliveSince.Remove(functionID)
 	m.functionIDToFunction.Remove(functionID)
 	m.functionIDToTaskIDs.Remove(functionID)
+
 	return nil
 }
 
 func (m *FunctionManager) SetTaskUse(taskID, functionID string) error {
 	m.functionIDToAliveSince.Set(functionID, time.Now())
+
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
 	if !ok {
 		return protocol.ErrFunctionDoesNotExist
 	}
+
 	taskIDs.Set(taskID, struct{}{})
+
 	return nil
 }
 
 func (m *FunctionManager) SetTaskDone(taskID, functionID string) error {
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
+
 	if !ok {
 		return protocol.ErrFunctionDoesNotExist
 	}
+
 	taskIDs.Remove(taskID)
+
 	return nil
 }
 
@@ -95,6 +123,8 @@ func (m *FunctionManager) HandleFunctionRequest(source string, request *protocol
 
 func (m *FunctionManager) OnFunctionCheck(source, functionID string) {
 	logging.Logger.Debugf("received function check request from %s", source)
+	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
+
 	if m.HasFunction(functionID) {
 		m.sendChan <- protocol.PackMessage(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
@@ -115,9 +145,12 @@ func (m *FunctionManager) OnFunctionCheck(source, functionID string) {
 
 func (m *FunctionManager) OnFunctionAdd(source, functionID string, function []byte) {
 	logging.Logger.Debugf("received function add request from %s", source)
+	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
+
 	err := m.AddFunction(functionID, function)
 	if errors.Is(err, protocol.ErrFunctionAlreadyExists) {
 		logging.Logger.Debugf("function %s already exists", functionID)
+
 		m.sendChan <- protocol.PackMessage(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeDuplicated,
@@ -125,7 +158,9 @@ func (m *FunctionManager) OnFunctionAdd(source, functionID string, function []by
 				FunctionContent: make([]byte, 0),
 			})
 	}
+
 	logging.Logger.Debugf("function %s added", functionID)
+
 	m.sendChan <- protocol.PackMessage(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,
@@ -136,6 +171,8 @@ func (m *FunctionManager) OnFunctionAdd(source, functionID string, function []by
 
 func (m *FunctionManager) OnFunctionRequest(source, functionID string) {
 	logging.Logger.Debugf("received function request from %s", source)
+	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
+
 	function, ok := m.functionIDToFunction.Get(functionID)
 	if !ok {
 		m.sendChan <- protocol.PackMessage(
@@ -146,6 +183,7 @@ func (m *FunctionManager) OnFunctionRequest(source, functionID string) {
 			})
 		return
 	}
+
 	m.sendChan <- protocol.PackMessage(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,
@@ -156,6 +194,8 @@ func (m *FunctionManager) OnFunctionRequest(source, functionID string) {
 
 func (m *FunctionManager) OnFunctionDelete(source, functionID string) {
 	logging.Logger.Debugf("received function delete request from %s", source)
+	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
+
 	if !m.HasFunction(functionID) {
 		m.sendChan <- protocol.PackMessage(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
@@ -165,6 +205,7 @@ func (m *FunctionManager) OnFunctionDelete(source, functionID string) {
 			})
 		return
 	}
+
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
 	if !ok {
 		m.sendChan <- protocol.PackMessage(
@@ -187,6 +228,7 @@ func (m *FunctionManager) OnFunctionDelete(source, functionID string) {
 	}
 
 	m.RemoveFunction(functionID)
+
 	m.sendChan <- protocol.PackMessage(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,

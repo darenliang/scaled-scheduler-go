@@ -272,8 +272,21 @@ func DeserializeMonitorRequest(data [][]byte) (*MonitorRequest, error) {
 	return &MonitorRequest{}, nil
 }
 
-// MonitorResponse TODO: protocol uses pickle right now, need to change to json.
-type MonitorResponse struct{}
+type MonitorResponse struct {
+	Data []byte
+}
+
+func (mr *MonitorResponse) Serialize() [][]byte {
+	return [][]byte{mr.Data}
+}
+
+func DeserializeMonitorResponse(data [][]byte) (*MonitorResponse, error) {
+	if len(data) != 1 {
+		return nil, ErrInvalidDataLength
+	}
+
+	return &MonitorResponse{Data: data[0]}, nil
+}
 
 type FunctionRequest struct {
 	Type            FunctionRequestType

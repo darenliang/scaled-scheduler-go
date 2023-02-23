@@ -2,9 +2,11 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/darenliang/scaled-scheduler-go/lib/logging"
@@ -28,6 +30,8 @@ type Scheduler struct {
 	functionManager       *managers.FunctionManager
 	workerManager         *managers.WorkerManager
 	taskManager           *managers.TaskManager
+	receivedStatistics    *utils.MessageTypeStatistics
+	sentStatistics        *utils.MessageTypeStatistics
 }
 
 func NewScheduler(
@@ -53,18 +57,22 @@ func NewScheduler(
 	ctx, cancel := context.WithCancel(ctx)
 	wg := &sync.WaitGroup{}
 
-	// initialize managers
-	clientManager := managers.NewClientManager(router.SendCh)
+	// initialize message type statistics
+	receivedStatistics := &utils.MessageTypeStatistics{}
+	sentStatistics := &utils.MessageTypeStatistics{}
 
-	functionManager := managers.NewFunctionManager(router.SendCh, functionRetentionTime)
+	// initialize managers
+	clientManager := managers.NewClientManager(router.SendCh, sentStatistics)
+
+	functionManager := managers.NewFunctionManager(router.SendCh, sentStatistics, functionRetentionTime)
 	go functionManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	workerManager := managers.NewWorkerManager(router.SendCh, perWorkerQueueSize, workerTimeout)
+	workerManager := managers.NewWorkerManager(router.SendCh, sentStatistics, perWorkerQueueSize, workerTimeout)
 	go workerManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	taskManager := managers.NewTaskManager(router.SendCh)
+	taskManager := managers.NewTaskManager(router.SendCh, sentStatistics)
 	go taskManager.RunTaskAssignLoop(ctx, wg)
 	wg.Add(1)
 
@@ -86,6 +94,8 @@ func NewScheduler(
 		functionManager:       functionManager,
 		workerManager:         workerManager,
 		taskManager:           taskManager,
+		receivedStatistics:    receivedStatistics,
+		sentStatistics:        sentStatistics,
 	}, nil
 }
 
@@ -147,16 +157,39 @@ func (s *Scheduler) HandleMessage(msg [][]byte) {
 
 func (s *Scheduler) HandleHeartbeat(source string, payload [][]byte) {
 	logging.Logger.Debugf("received heartbeat from %s", source)
+	atomic.AddUint64(&s.receivedStatistics.Heartbeat, 1)
 	s.workerManager.OnHeartbeat(source)
 }
 
 func (s *Scheduler) HandleMonitoringRequest(source string, payload [][]byte) {
 	logging.Logger.Debugf("received monitoring request from %s", source)
-	logging.Logger.Warnf("monitoring request not implemented yet")
+	atomic.AddUint64(&s.receivedStatistics.MonitoringRequest, 1)
+
+	statistics := &utils.SchedulerStatistics{
+		Received:        s.receivedStatistics,
+		Sent:            s.sentStatistics,
+		TaskManager:     s.taskManager.GetStatistics(),
+		FunctionManager: s.functionManager.GetStatistics(),
+		WorkerManager:   s.workerManager.GetStatistics(),
+	}
+
+	data, err := json.Marshal(statistics)
+	if err != nil {
+		logging.Logger.Error(err)
+		return
+	}
+
+	s.router.SendCh <- protocol.PackMessage(
+		source,
+		protocol.MessageTypeMonitoringResponse,
+		&protocol.MonitorResponse{Data: data},
+	)
+	atomic.AddUint64(&s.sentStatistics.MonitoringResponse, 1)
 }
 
 func (s *Scheduler) HandleFunctionRequest(source string, payload [][]byte) {
 	logging.Logger.Debugf("received task cancel from %s", source)
+	atomic.AddUint64(&s.receivedStatistics.FunctionRequest, 1)
 	request, err := protocol.DeserializeFunctionRequest(payload)
 	if err != nil {
 		logging.Logger.Error(err)
@@ -167,6 +200,7 @@ func (s *Scheduler) HandleFunctionRequest(source string, payload [][]byte) {
 
 func (s *Scheduler) HandleTask(source string, payload [][]byte) {
 	logging.Logger.Debugf("received task from %s", source)
+	atomic.AddUint64(&s.receivedStatistics.Task, 1)
 	task, err := protocol.DeserializeTask(payload)
 	if err != nil {
 		logging.Logger.Error(err)
@@ -181,6 +215,7 @@ func (s *Scheduler) HandleTask(source string, payload [][]byte) {
 
 func (s *Scheduler) HandleTaskCancel(source string, payload [][]byte) {
 	logging.Logger.Debugf("received task cancel from %s", source)
+	atomic.AddUint64(&s.receivedStatistics.TaskCancel, 1)
 	taskCancel, err := protocol.DeserializeTaskCancel(payload)
 	if err != nil {
 		logging.Logger.Error(err)
@@ -195,6 +230,7 @@ func (s *Scheduler) HandleTaskCancel(source string, payload [][]byte) {
 
 func (s *Scheduler) HandleTaskResult(source string, payload [][]byte) {
 	logging.Logger.Debugf("received task result from %s", source)
+	atomic.AddUint64(&s.receivedStatistics.TaskResult, 1)
 	taskResult, err := protocol.DeserializeTaskResult(payload)
 	if err != nil {
 		logging.Logger.Error(err)
