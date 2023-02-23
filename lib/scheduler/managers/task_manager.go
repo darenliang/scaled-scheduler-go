@@ -147,6 +147,9 @@ func (m *TaskManager) OnAssignTask(ctx context.Context, entry *TaskQueueEntry) e
 
 	err := m.workerManager.OnAssignTask(ctx, entry.Task)
 	if err != nil {
+		m.taskIDToClientID.Remove(entry.Task.TaskID)
+		m.taskIDToTask.Remove(entry.Task.TaskID)
+		m.runningTaskIDs.Remove(entry.Task.TaskID)
 		return err
 	}
 
