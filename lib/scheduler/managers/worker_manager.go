@@ -3,7 +3,7 @@ package managers
 import (
 	"container/heap"
 	"context"
-	"runtime"
+	"github.com/marusama/semaphore/v2"
 	"sync"
 	"time"
 
@@ -21,8 +21,9 @@ type WorkerManager struct {
 	workerIDToAliveSince cmap.ConcurrentMap[string, time.Time]
 	workerIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
 	taskIDToWorkerID     cmap.ConcurrentMap[string, string]
-	workerIDQueue        *utils.WorkerHeap
-	workerIDQueueLock    sync.Mutex
+	workerQueue          *utils.WorkerHeap
+	workerQueueLock      sync.Mutex
+	workerQueueSemaphore semaphore.Semaphore
 }
 
 func NewWorkerManager(sendChan chan<- [][]byte, perWorkerQueueSize int, workerTimeout time.Duration) *WorkerManager {
@@ -33,7 +34,8 @@ func NewWorkerManager(sendChan chan<- [][]byte, perWorkerQueueSize int, workerTi
 		workerIDToAliveSince: cmap.New[time.Time](),
 		workerIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
 		taskIDToWorkerID:     cmap.New[string](),
-		workerIDQueue:        utils.NewWorkerHeap(),
+		workerQueue:          utils.NewWorkerHeap(),
+		workerQueueSemaphore: semaphore.New(0),
 	}
 }
 
@@ -45,13 +47,14 @@ func (m *WorkerManager) OnHeartbeat(workerID string) {
 	m.workerIDToAliveSince.Upsert(
 		workerID,
 		time.Now(),
-		func(ok bool, _ time.Time, newValue time.Time) time.Time {
-			if !ok {
+		func(exist bool, _, newValue time.Time) time.Time {
+			if !exist {
 				logging.Logger.Infof("worker %s connected", workerID)
 				m.workerIDToTaskIDs.Set(workerID, cmap.New[struct{}]())
-				m.workerIDQueueLock.Lock()
-				heap.Push(m.workerIDQueue, &utils.WorkerHeapEntry{WorkerID: workerID, Tasks: 0})
-				m.workerIDQueueLock.Unlock()
+				m.workerQueueLock.Lock()
+				heap.Push(m.workerQueue, &utils.WorkerHeapEntry{WorkerID: workerID, Tasks: 0})
+				m.workerQueueSemaphore.SetLimit(m.workerQueue.Len() * m.perWorkerQueueSize)
+				m.workerQueueLock.Unlock()
 			}
 			return newValue
 		},
@@ -63,38 +66,24 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 	if id, ok := m.taskIDToWorkerID.Get(task.TaskID); ok {
 		workerID = id
 	} else {
-		m.workerIDQueueLock.Lock()
-		if m.workerIDQueue.Len() == 0 {
-			m.workerIDQueueLock.Unlock()
+		m.workerQueueLock.Lock()
+		if m.workerQueue.Len() == 0 {
+			m.workerQueueLock.Unlock()
 			return protocol.ErrNoWorkerAvailable
 		}
-		var entry *utils.WorkerHeapEntry
 
-		// spinlock until we find a worker with available slots
-		for {
-			entry = m.workerIDQueue.Peek()
-			if entry.Tasks < m.perWorkerQueueSize {
-				break
-			}
-
-			// stop if context is cancelled
-			if ctx.Err() != nil {
-				m.workerIDQueueLock.Unlock()
-				return ctx.Err()
-			}
-
-			m.workerIDQueueLock.Unlock()
-
-			// make go runtime switch contexts
-			runtime.Gosched()
-
-			m.workerIDQueueLock.Lock()
+		m.workerQueueLock.Unlock()
+		err := m.workerQueueSemaphore.Acquire(ctx, 1)
+		if err != nil {
+			return ctx.Err()
 		}
+		m.workerQueueLock.Lock()
 
+		entry := m.workerQueue.Peek()
 		workerID = entry.WorkerID
 		entry.Tasks++
-		heap.Fix(m.workerIDQueue, 0)
-		m.workerIDQueueLock.Unlock()
+		heap.Fix(m.workerQueue, 0)
+		m.workerQueueLock.Unlock()
 	}
 
 	taskIDs, ok := m.workerIDToTaskIDs.Get(workerID)
@@ -102,6 +91,7 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 		return protocol.ErrWorkerNotFound
 	}
 	taskIDs.Set(task.TaskID, struct{}{})
+
 	m.taskIDToWorkerID.Set(task.TaskID, workerID)
 	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTask, task)
 
@@ -128,11 +118,15 @@ func (m *WorkerManager) OnTaskDone(taskResult *protocol.TaskResult) error {
 	}
 	taskIDs.Remove(taskResult.TaskID)
 
-	m.workerIDQueueLock.Lock()
-	m.workerIDQueue.AddTasks(workerID, -1)
-	m.workerIDQueueLock.Unlock()
+	m.workerQueueLock.Lock()
+	m.workerQueue.AddTasks(workerID, -1)
+	m.workerQueueSemaphore.Release(1)
+	m.workerQueueLock.Unlock()
 
-	m.taskManager.OnTaskDone(taskResult)
+	err := m.taskManager.OnTaskDone(taskResult)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -153,12 +147,13 @@ func (m *WorkerManager) RunGC(ctx context.Context, wg *sync.WaitGroup) {
 			for _, workerID := range deadWorkerIDs {
 				m.workerIDToAliveSince.Remove(workerID)
 
-				m.workerIDQueueLock.Lock()
-				entry, ok := m.workerIDQueue.WorkerIDToEntry[workerID]
+				m.workerQueueLock.Lock()
+				entry, ok := m.workerQueue.WorkerIDToEntry[workerID]
 				if ok {
-					heap.Remove(m.workerIDQueue, entry.Index)
+					heap.Remove(m.workerQueue, entry.Index)
 				}
-				m.workerIDQueueLock.Unlock()
+				m.workerQueueSemaphore.SetLimit(m.workerQueue.Len() * m.perWorkerQueueSize)
+				m.workerQueueLock.Unlock()
 
 				taskIDs, ok := m.workerIDToTaskIDs.Pop(workerID)
 				if ok {

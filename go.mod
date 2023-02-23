@@ -5,6 +5,7 @@ go 1.19
 require (
 	github.com/alecthomas/kingpin/v2 v2.3.1
 	github.com/google/uuid v1.3.0
+	github.com/marusama/semaphore/v2 v2.5.0
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/panjf2000/ants/v2 v2.7.1
 	github.com/pebbe/zmq4 v1.2.9

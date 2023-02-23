@@ -116,6 +116,7 @@ func (m *TaskManager) OnTaskCancel(clientID, taskID string) error {
 			TaskID: taskID,
 			Status: protocol.TaskEchoStatusCancelOK,
 		})
+
 	err := m.workerManager.OnTaskCancel(taskID)
 	if err != nil {
 		return err
@@ -139,83 +140,100 @@ func (m *TaskManager) OnTaskDone(result *protocol.TaskResult) error {
 
 func (m *TaskManager) OnAssignTask(ctx context.Context, entry *TaskQueueEntry) error {
 	logging.Logger.Debugf("assigning task %s to a worker", entry.Task.TaskID)
+
+	m.taskIDToClientID.Set(entry.Task.TaskID, entry.ClientID)
+	m.taskIDToTask.Set(entry.Task.TaskID, entry.Task)
+	m.runningTaskIDs.Set(entry.Task.TaskID, struct{}{})
+
 	err := m.workerManager.OnAssignTask(ctx, entry.Task)
 	if err != nil {
 		return err
 	}
-	m.taskIDToClientID.Set(entry.Task.TaskID, entry.ClientID)
-	m.taskIDToTask.Set(entry.Task.TaskID, entry.Task)
-	m.runningTaskIDs.Set(entry.Task.TaskID, struct{}{})
 
 	return nil
 }
 
 func (m *TaskManager) OnTaskSuccess(result *protocol.TaskResult) error {
 	logging.Logger.Debugf("task %s successfully finished", result.TaskID)
-	if !m.runningTaskIDs.Has(result.TaskID) {
-		return nil
+
+	_, ok := m.runningTaskIDs.Pop(result.TaskID)
+	if !ok {
+		return protocol.ErrTaskNotFound
 	}
 
-	m.runningTaskIDs.Remove(result.TaskID)
 	task, ok := m.taskIDToTask.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	clientID, _ := m.taskIDToClientID.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
 func (m *TaskManager) OnTaskFailed(result *protocol.TaskResult) error {
 	logging.Logger.Debugf("task %s failed", result.TaskID)
-	if !m.runningTaskIDs.Has(result.TaskID) {
-		return nil
+
+	_, ok := m.runningTaskIDs.Pop(result.TaskID)
+	if !ok {
+		return protocol.ErrTaskNotFound
 	}
 
-	m.runningTaskIDs.Remove(result.TaskID)
 	task, ok := m.taskIDToTask.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	clientID, _ := m.taskIDToClientID.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
 func (m *TaskManager) OnTaskCanceled(result *protocol.TaskResult) error {
 	logging.Logger.Debugf("task %s is canceled", result.TaskID)
-	if !m.cancelingTaskIDs.Has(result.TaskID) {
-		return nil
+
+	_, ok := m.cancelingTaskIDs.Pop(result.TaskID)
+	if !ok {
+		return protocol.ErrTaskNotFound
 	}
 
-	m.cancelingTaskIDs.Remove(result.TaskID)
 	task, ok := m.taskIDToTask.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	clientID, _ := m.taskIDToClientID.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
+
 	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
