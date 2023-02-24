@@ -1,15 +1,18 @@
 package managers
 
-import "github.com/darenliang/scaled-scheduler-go/lib/scheduler/utils"
+import (
+	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/utils"
+	"github.com/go-zeromq/zmq4"
+)
 
 type ClientManager struct {
-	sendChan       chan<- [][]byte
+	router         zmq4.Socket
 	sentStatistics *utils.MessageTypeStatistics
 }
 
-func NewClientManager(sendChan chan<- [][]byte, sentStatistics *utils.MessageTypeStatistics) *ClientManager {
+func NewClientManager(router zmq4.Socket, sentStatistics *utils.MessageTypeStatistics) *ClientManager {
 	return &ClientManager{
-		sendChan:       sendChan,
+		router:         router,
 		sentStatistics: sentStatistics,
 	}
 }

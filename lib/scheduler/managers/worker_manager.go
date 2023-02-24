@@ -3,6 +3,7 @@ package managers
 import (
 	"container/heap"
 	"context"
+	"github.com/go-zeromq/zmq4"
 	"github.com/marusama/semaphore/v2"
 	"sync"
 	"sync/atomic"
@@ -15,7 +16,7 @@ import (
 )
 
 type WorkerManager struct {
-	sendChan             chan<- [][]byte
+	router               zmq4.Socket
 	sentStatistics       *utils.MessageTypeStatistics
 	perWorkerQueueSize   int
 	workerTimeout        time.Duration
@@ -29,13 +30,13 @@ type WorkerManager struct {
 }
 
 func NewWorkerManager(
-	sendChan chan<- [][]byte,
+	router zmq4.Socket,
 	sentStatistics *utils.MessageTypeStatistics,
 	perWorkerQueueSize int,
 	workerTimeout time.Duration,
 ) *WorkerManager {
 	return &WorkerManager{
-		sendChan:             sendChan,
+		router:               router,
 		sentStatistics:       sentStatistics,
 		perWorkerQueueSize:   perWorkerQueueSize,
 		workerTimeout:        workerTimeout,
@@ -112,7 +113,7 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 	taskIDs.Set(task.TaskID, struct{}{})
 
 	m.taskIDToWorkerID.Set(task.TaskID, workerID)
-	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTask, task)
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(workerID, protocol.MessageTypeTask, task)))
 	atomic.AddUint64(&m.sentStatistics.Task, 1)
 
 	return nil
@@ -124,7 +125,7 @@ func (m *WorkerManager) OnTaskCancel(taskID string) error {
 		return protocol.ErrTaskNotFound
 	}
 
-	m.sendChan <- protocol.PackMessage(workerID, protocol.MessageTypeTaskCancel, &protocol.TaskCancel{TaskID: taskID})
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(workerID, protocol.MessageTypeTaskCancel, &protocol.TaskCancel{TaskID: taskID})))
 	atomic.AddUint64(&m.sentStatistics.TaskCancel, 1)
 
 	return nil

@@ -14,3 +14,9 @@ func InitLogger(level zapcore.LevelEnabler) {
 	}
 	Logger = logger.Sugar()
 }
+
+func CheckError(err error) {
+	if err != nil {
+		Logger.Error(err)
+	}
+}

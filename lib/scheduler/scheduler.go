@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/go-zeromq/zmq4"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -19,13 +20,14 @@ import (
 
 type Scheduler struct {
 	address               string
-	perWorkerQueueSize    int
 	workerTimeout         time.Duration
 	functionRetentionTime time.Duration
+	perWorkerQueueSize    int
+	maxRequestWorkers     int
 	ctx                   context.Context
 	wg                    *sync.WaitGroup
 	cancel                context.CancelFunc
-	router                *utils.RouterChanneler
+	router                zmq4.Socket
 	clientManager         *managers.ClientManager
 	functionManager       *managers.FunctionManager
 	workerManager         *managers.WorkerManager
@@ -37,24 +39,25 @@ type Scheduler struct {
 func NewScheduler(
 	ctx context.Context,
 	address string,
-	perWorkerQueueSize int,
 	workerTimeout, functionRetentionTime time.Duration,
+	perWorkerQueueSize, maxRequestWorkers int,
 ) (*Scheduler, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return nil, err
 	}
 
-	router, err := utils.NewRouterChanneler(
-		address,
-		fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String()),
-	)
-	if err != nil {
+	// create context to cancel background goroutines
+	ctx, cancel := context.WithCancel(ctx)
+
+	// create router
+	identity := zmq4.SocketIdentity(fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String()))
+	router := zmq4.NewRouter(ctx, zmq4.WithID(identity))
+	if err := router.Listen(address); err != nil {
+		cancel()
 		return nil, err
 	}
 
-	// create context to cancel background goroutines
-	ctx, cancel := context.WithCancel(ctx)
 	wg := &sync.WaitGroup{}
 
 	// initialize message type statistics
@@ -62,17 +65,17 @@ func NewScheduler(
 	sentStatistics := &utils.MessageTypeStatistics{}
 
 	// initialize managers
-	clientManager := managers.NewClientManager(router.SendCh, sentStatistics)
+	clientManager := managers.NewClientManager(router, sentStatistics)
 
-	functionManager := managers.NewFunctionManager(router.SendCh, sentStatistics, functionRetentionTime)
+	functionManager := managers.NewFunctionManager(router, sentStatistics, functionRetentionTime)
 	go functionManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	workerManager := managers.NewWorkerManager(router.SendCh, sentStatistics, perWorkerQueueSize, workerTimeout)
+	workerManager := managers.NewWorkerManager(router, sentStatistics, perWorkerQueueSize, workerTimeout)
 	go workerManager.RunGC(ctx, wg)
 	wg.Add(1)
 
-	taskManager := managers.NewTaskManager(router.SendCh, sentStatistics)
+	taskManager := managers.NewTaskManager(router, sentStatistics)
 	go taskManager.RunTaskAssignLoop(ctx, wg)
 	wg.Add(1)
 
@@ -83,9 +86,10 @@ func NewScheduler(
 
 	return &Scheduler{
 		address:               address,
-		perWorkerQueueSize:    perWorkerQueueSize,
 		workerTimeout:         workerTimeout,
 		functionRetentionTime: functionRetentionTime,
+		perWorkerQueueSize:    perWorkerQueueSize,
+		maxRequestWorkers:     maxRequestWorkers,
 		ctx:                   ctx,
 		wg:                    wg,
 		cancel:                cancel,
@@ -102,27 +106,36 @@ func NewScheduler(
 func (s *Scheduler) Run() {
 	logging.Logger.Info("scheduler started")
 
-	pool, err := ants.NewPool(ants.DefaultAntsPoolSize)
+	var pool *ants.Pool
+	var err error
+	if s.maxRequestWorkers > 0 {
+		pool, err = ants.NewPool(s.maxRequestWorkers, ants.WithPreAlloc(true))
+	} else {
+		pool, err = ants.NewPool(ants.DefaultAntsPoolSize)
+	}
 	if err != nil {
 		logging.Logger.Fatal(err)
 	}
 
 	for {
-		select {
-		case msg := <-s.router.RecvCh:
-			err := pool.Submit(func() { s.HandleMessage(msg) })
-			if err != nil {
-				logging.Logger.Error(err)
-			}
-		case err := <-s.router.ErrCh:
-			logging.Logger.Error(err)
-		case <-s.ctx.Done():
+		msg, err := s.router.Recv()
+
+		if err == context.Canceled {
 			s.cancel()
 			pool.Release()
 			s.wg.Wait()
 			s.router.Close()
 			logging.Logger.Info("scheduler exited")
 			return
+		}
+		if err != nil {
+			logging.Logger.Error(err)
+			continue
+		}
+
+		err = pool.Submit(func() { s.HandleMessage(msg.Frames) })
+		if err != nil {
+			logging.Logger.Error(err)
 		}
 	}
 }
@@ -179,11 +192,15 @@ func (s *Scheduler) HandleMonitoringRequest(source string, payload [][]byte) {
 		return
 	}
 
-	s.router.SendCh <- protocol.PackMessage(
+	if err := s.router.SendMulti(protocol.PackMessage(
 		source,
 		protocol.MessageTypeMonitoringResponse,
 		&protocol.MonitorResponse{Data: data},
-	)
+	)); err != nil {
+		logging.Logger.Error(err)
+		return
+	}
+
 	atomic.AddUint64(&s.sentStatistics.MonitoringResponse, 1)
 }
 

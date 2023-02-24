@@ -3,6 +3,7 @@ package managers
 import (
 	"context"
 	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/utils"
+	"github.com/go-zeromq/zmq4"
 	"sync"
 	"sync/atomic"
 
@@ -17,7 +18,7 @@ type TaskQueueEntry struct {
 }
 
 type TaskManager struct {
-	sendChan                  chan<- [][]byte
+	router                    zmq4.Socket
 	sentStatistics            *utils.MessageTypeStatistics
 	functionManager           *FunctionManager
 	workerManager             *WorkerManager
@@ -31,9 +32,9 @@ type TaskManager struct {
 	canceledTaskCount         uint64
 }
 
-func NewTaskManager(sendChan chan<- [][]byte, sentStatistics *utils.MessageTypeStatistics) *TaskManager {
+func NewTaskManager(router zmq4.Socket, sentStatistics *utils.MessageTypeStatistics) *TaskManager {
 	return &TaskManager{
-		sendChan:            sendChan,
+		router:              router,
 		sentStatistics:      sentStatistics,
 		taskIDToClientID:    cmap.New[string](),
 		taskIDToTask:        cmap.New[*protocol.Task](),
@@ -65,19 +66,20 @@ func (m *TaskManager) OnTaskNew(clientID string, task *protocol.Task) error {
 	defer atomic.AddUint64(&m.sentStatistics.TaskEcho, 1)
 
 	if !m.functionManager.HasFunction(task.FunctionID) {
-		m.sendChan <- protocol.PackMessage(
+		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
 			clientID, protocol.MessageTypeTaskEcho, &protocol.TaskEcho{
 				TaskID: task.TaskID,
 				Status: protocol.TaskEchoStatusFunctionNotExists,
-			})
+			})))
 		return nil
 	}
 
-	m.sendChan <- protocol.PackMessage(
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
 		clientID, protocol.MessageTypeTaskEcho, &protocol.TaskEcho{
 			TaskID: task.TaskID,
 			Status: protocol.TaskEchoStatusSubmitOK,
-		})
+		})))
+
 	err := m.functionManager.SetTaskUse(task.TaskID, task.FunctionID)
 	if err != nil {
 		return err
@@ -113,32 +115,34 @@ func (m *TaskManager) OnTaskCancel(clientID, taskID string) error {
 
 	if m.cancelingTaskIDs.Has(taskID) {
 		logging.Logger.Warnf("task %s is already being canceled", taskID)
-		m.sendChan <- protocol.PackMessage(
+		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
 			clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 				TaskID: taskID,
 				Status: protocol.TaskEchoStatusDuplicated,
-			})
+			})))
+
 		return nil
 	}
 
 	if !m.runningTaskIDs.Has(taskID) {
 		logging.Logger.Warnf("task %s is not running", taskID)
-		m.sendChan <- protocol.PackMessage(
+		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
 			clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 				TaskID: taskID,
 				Status: protocol.TaskEchoStatusDuplicated,
-			})
+			})))
+
 		return nil
 	}
 
 	m.cancelingTaskIDs.Set(taskID, struct{}{})
 	m.runningTaskIDs.Remove(taskID)
 
-	m.sendChan <- protocol.PackMessage(
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
 		clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 			TaskID: taskID,
 			Status: protocol.TaskEchoStatusCancelOK,
-		})
+		})))
 
 	err := m.workerManager.OnTaskCancel(taskID)
 	if err != nil {
@@ -197,7 +201,7 @@ func (m *TaskManager) OnTaskSuccess(result *protocol.TaskResult) error {
 		return protocol.ErrTaskNotFound
 	}
 
-	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
@@ -228,7 +232,7 @@ func (m *TaskManager) OnTaskFailed(result *protocol.TaskResult) error {
 
 	atomic.AddUint64(&m.failedTaskCount, 1)
 
-	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
@@ -259,7 +263,7 @@ func (m *TaskManager) OnTaskCanceled(result *protocol.TaskResult) error {
 
 	atomic.AddUint64(&m.canceledTaskCount, 1)
 
-	m.sendChan <- protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)
+	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)

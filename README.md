@@ -7,20 +7,10 @@ replacement for scaled's Python scheduler.
 
 ## Building
 
-### Using libzmq as a shared library
-
-Go 1.19+ is supported and cgo must be enabled.
+Go 1.19+ is supported.
 
 ```bash
 go build
-```
-
-### Standalone binary
-
-Docker is the recommended way to build a standalone binary.
-
-```bash
-./build.sh
 ```
 
 ## Usage
