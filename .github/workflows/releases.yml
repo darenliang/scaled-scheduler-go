@@ -9,39 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  build-linux:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
       - name: Setup Go
         uses: actions/setup-go@v3
         with:
           go-version: 1.*
           check-latest: true
-      - name: Build
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v4
         env:
           CGO_ENABLED: 0
-        run: go build -o scaled-scheduler-go -ldflags="-s -w"
-      - name: Upload
-        uses: actions/upload-artifact@v3
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: scaled-scheduler-go-linux
-          path: scaled-scheduler-go
-  release:
-    needs: [ build-linux ]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Download Linux artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: scaled-scheduler-go-linux
-      - name: Tar Gzip Linux release
-        run: tar -czvf scaled_scheduler_go_${{github.ref_name}}_linux_amd64.tar.gz scaled-scheduler-go README.md LICENSE
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            scaled_scheduler_go_${{github.ref_name}}_linux_amd64.tar.gz
+          distribution: goreleaser
+          version: latest
+          args: release --clean
