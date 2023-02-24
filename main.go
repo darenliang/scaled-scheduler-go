@@ -19,7 +19,7 @@ var (
 	perWorkerQueueSize = kingpin.Flag("per-worker-queue-size", "Specify per worker queue size.").Default("1000").Int()
 	maxRequestWorkers  = kingpin.Flag("max-request-workers", "Specify max number of workers to handle request. A non-positive value signifies no limit.").Default("-1").Int()
 	debug              = kingpin.Flag("debug", "Print debug logs.").Default("false").Bool()
-	version            = kingpin.CommandLine.Version(lib.Version)
+	_                  = kingpin.CommandLine.Version(lib.Version)
 )
 
 func main() {
