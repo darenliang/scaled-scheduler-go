@@ -14,8 +14,8 @@ import (
 
 var (
 	address            = kingpin.Arg("address", "Scheduler address to connect to.").Required().String()
-	workerTimeout      = kingpin.Flag("worker-timeout-seconds", "Discard worker when timeout seconds reached.").Default("1m").Duration()
-	functionRetention  = kingpin.Flag("function-retention-seconds", "Discard function in scheduler when timeout seconds reached.").Default("1h").Duration()
+	workerTimeout      = kingpin.Flag("worker-timeout", "Discard worker when timeout is reached.").Default("1m").Duration()
+	functionRetention  = kingpin.Flag("function-retention", "Discard function in scheduler when timeout is reached.").Default("1h").Duration()
 	perWorkerQueueSize = kingpin.Flag("per-worker-queue-size", "Specify per worker queue size.").Default("1000").Int()
 	debug              = kingpin.Flag("debug", "Print debug logs.").Default("false").Bool()
 	version            = kingpin.CommandLine.Version(lib.Version)
