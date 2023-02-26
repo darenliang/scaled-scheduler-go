@@ -1,5 +1,7 @@
 package utils
 
+import "github.com/google/uuid"
+
 type MessageTypeStatistics struct {
 	Task               uint64 `json:"Task"`
 	TaskEcho           uint64 `json:"TaskEcho"`
@@ -22,7 +24,7 @@ type TaskManagerStatistics struct {
 }
 
 type FunctionManagerStatistics struct {
-	FunctionIDToTasks map[string]uint64 `json:"function_id_to_tasks"`
+	FunctionIDToTasks map[uuid.UUID]uint64 `json:"function_id_to_tasks"`
 }
 
 type WorkerManagerStatistics struct {

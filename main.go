@@ -18,7 +18,7 @@ var (
 	functionRetention  = kingpin.Flag("function-retention", "Discard function in scheduler when timeout is reached.").Default("1h").Duration()
 	perWorkerQueueSize = kingpin.Flag("per-worker-queue-size", "Specify per worker queue size.").Default("1000").Int()
 	maxRequestWorkers  = kingpin.Flag("max-request-workers", "Specify max number of workers to handle request. A non-positive value signifies no limit.").Default("-1").Int()
-	debug              = kingpin.Flag("debug", "Print debug logs.").Default("false").Bool()
+	logLevel           = kingpin.Flag("log-level", "Specify log level.").Default("info").Enum("debug", "info", "warn", "error")
 	_                  = kingpin.CommandLine.Version(lib.Version)
 )
 
@@ -26,10 +26,15 @@ func main() {
 	kingpin.Parse()
 
 	// init logger
-	if *debug {
+	switch *logLevel {
+	case "debug":
 		logging.InitLogger(zap.DebugLevel)
-	} else {
+	case "info":
 		logging.InitLogger(zap.InfoLevel)
+	case "warn":
+		logging.InitLogger(zap.WarnLevel)
+	case "error":
+		logging.InitLogger(zap.ErrorLevel)
 	}
 
 	// create context
@@ -40,6 +45,7 @@ func main() {
 	signal.Notify(signalCh, os.Interrupt)
 	go func() {
 		<-signalCh
+		logging.Logger.Info("received interrupt signal, shutting down scheduler")
 		cancel()
 	}()
 

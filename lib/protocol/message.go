@@ -2,6 +2,9 @@ package protocol
 
 import (
 	"encoding/binary"
+	"encoding/hex"
+	"github.com/google/uuid"
+	"go.uber.org/zap/zapcore"
 	"math"
 )
 
@@ -116,14 +119,22 @@ var FunctionResponseTypeSet = map[FunctionResponseType]struct{}{
 }
 
 type Task struct {
-	TaskID          string
-	FunctionID      string
+	TaskID          uuid.UUID // TODO: task is a binary uuid
+	FunctionID      uuid.UUID
 	FunctionContent []byte
 	FunctionArgs    []byte
 }
 
 func (t *Task) Serialize() [][]byte {
-	return [][]byte{[]byte(t.TaskID), []byte(t.FunctionID), t.FunctionContent, t.FunctionArgs}
+	return [][]byte{t.TaskID[:], []byte(hex.EncodeToString(t.FunctionID[:])), t.FunctionContent, t.FunctionArgs}
+}
+
+func (t *Task) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("task_id", t.TaskID.String())
+	enc.AddString("function_id", t.FunctionID.String())
+	enc.AddInt("function_content_len", len(t.FunctionContent))
+	enc.AddInt("function_args_len", len(t.FunctionArgs))
+	return nil
 }
 
 func DeserializeTask(data [][]byte) (*Task, error) {
@@ -131,21 +142,37 @@ func DeserializeTask(data [][]byte) (*Task, error) {
 		return nil, ErrInvalidDataLength
 	}
 
+	taskID, err := uuid.FromBytes(data[0])
+	if err != nil {
+		return nil, err
+	}
+
+	functionID, err := uuid.ParseBytes(data[1])
+	if err != nil {
+		return nil, err
+	}
+
 	return &Task{
-		TaskID:          string(data[0]),
-		FunctionID:      string(data[1]),
+		TaskID:          taskID,
+		FunctionID:      functionID,
 		FunctionContent: data[2],
 		FunctionArgs:    data[3],
 	}, nil
 }
 
 type TaskEcho struct {
-	TaskID string
+	TaskID uuid.UUID // TODO: task is a binary uuid
 	Status TaskEchoStatus
 }
 
 func (te *TaskEcho) Serialize() [][]byte {
-	return [][]byte{[]byte(te.TaskID), []byte(te.Status)}
+	return [][]byte{te.TaskID[:], []byte(te.Status)}
+}
+
+func (te *TaskEcho) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("task_id", te.TaskID.String())
+	enc.AddString("status", te.Status.String())
+	return nil
 }
 
 func DeserializeTaskEcho(data [][]byte) (*TaskEcho, error) {
@@ -157,18 +184,28 @@ func DeserializeTaskEcho(data [][]byte) (*TaskEcho, error) {
 		return nil, ErrInvalidEnum
 	}
 
+	taskID, err := uuid.FromBytes(data[0])
+	if err != nil {
+		return nil, err
+	}
+
 	return &TaskEcho{
-		TaskID: string(data[0]),
+		TaskID: taskID,
 		Status: TaskEchoStatus(data[1]),
 	}, nil
 }
 
 type TaskCancel struct {
-	TaskID string
+	TaskID uuid.UUID // TODO: task is a binary uuid
 }
 
 func (tc *TaskCancel) Serialize() [][]byte {
-	return [][]byte{[]byte(tc.TaskID)}
+	return [][]byte{tc.TaskID[:]}
+}
+
+func (tc *TaskCancel) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("task_id", tc.TaskID.String())
+	return nil
 }
 
 func DeserializeTaskCancel(data [][]byte) (*TaskCancel, error) {
@@ -176,18 +213,29 @@ func DeserializeTaskCancel(data [][]byte) (*TaskCancel, error) {
 		return nil, ErrInvalidDataLength
 	}
 
+	taskID, err := uuid.FromBytes(data[0])
+	if err != nil {
+		return nil, err
+	}
+
 	return &TaskCancel{
-		TaskID: string(data[0]),
+		TaskID: taskID,
 	}, nil
 }
 
 type TaskCancelEcho struct {
-	TaskID string
+	TaskID uuid.UUID // TODO: task is a binary uuid
 	Status TaskEchoStatus
 }
 
 func (tce *TaskCancelEcho) Serialize() [][]byte {
-	return [][]byte{[]byte(tce.TaskID), []byte(tce.Status)}
+	return [][]byte{tce.TaskID[:], []byte(tce.Status)}
+}
+
+func (tce *TaskCancelEcho) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("task_id", tce.TaskID.String())
+	enc.AddString("status", tce.Status.String())
+	return nil
 }
 
 func DeserializeTaskCancelEcho(data [][]byte) (*TaskCancelEcho, error) {
@@ -199,14 +247,19 @@ func DeserializeTaskCancelEcho(data [][]byte) (*TaskCancelEcho, error) {
 		return nil, ErrInvalidEnum
 	}
 
+	taskID, err := uuid.FromBytes(data[0])
+	if err != nil {
+		return nil, err
+	}
+
 	return &TaskCancelEcho{
-		TaskID: string(data[0]),
+		TaskID: taskID,
 		Status: TaskEchoStatus(data[1]),
 	}, nil
 }
 
 type TaskResult struct {
-	TaskID   string
+	TaskID   uuid.UUID // TODO: task is a binary uuid
 	Status   TaskStatus
 	Result   []byte
 	Duration float32
@@ -215,7 +268,15 @@ type TaskResult struct {
 func (tr *TaskResult) Serialize() [][]byte {
 	buffer := make([]byte, 4)
 	binary.LittleEndian.PutUint32(buffer, math.Float32bits(tr.Duration))
-	return [][]byte{[]byte(tr.TaskID), []byte(tr.Status), buffer, tr.Result}
+	return [][]byte{tr.TaskID[:], []byte(tr.Status), buffer, tr.Result}
+}
+
+func (tr *TaskResult) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("task_id", tr.TaskID.String())
+	enc.AddString("status", tr.Status.String())
+	enc.AddInt("result_len", len(tr.Result))
+	enc.AddFloat32("duration", tr.Duration)
+	return nil
 }
 
 func DeserializeTaskResult(data [][]byte) (*TaskResult, error) {
@@ -227,8 +288,13 @@ func DeserializeTaskResult(data [][]byte) (*TaskResult, error) {
 		return nil, ErrInvalidEnum
 	}
 
+	taskID, err := uuid.FromBytes(data[0])
+	if err != nil {
+		return nil, err
+	}
+
 	return &TaskResult{
-		TaskID:   string(data[0]),
+		TaskID:   taskID,
 		Status:   TaskStatus(data[1]),
 		Duration: math.Float32frombits(binary.LittleEndian.Uint32(data[2])),
 		Result:   data[3],
@@ -245,6 +311,12 @@ func (h *Heartbeat) Serialize() [][]byte {
 	binary.LittleEndian.PutUint32(buffer[:4], math.Float32bits(h.cpuUsage))
 	binary.LittleEndian.PutUint64(buffer[4:], h.rssSize)
 	return [][]byte{buffer}
+}
+
+func (h *Heartbeat) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddFloat32("cpu_usage", h.cpuUsage)
+	enc.AddUint64("rss_size", h.rssSize)
+	return nil
 }
 
 func DeserializeHeartbeat(data [][]byte) (*Heartbeat, error) {
@@ -264,6 +336,10 @@ func (mr *MonitorRequest) Serialize() [][]byte {
 	return [][]byte{{}}
 }
 
+func (mr *MonitorRequest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	return nil
+}
+
 func DeserializeMonitorRequest(data [][]byte) (*MonitorRequest, error) {
 	if len(data) != 1 {
 		return nil, ErrInvalidDataLength
@@ -280,6 +356,11 @@ func (mr *MonitorResponse) Serialize() [][]byte {
 	return [][]byte{mr.Data}
 }
 
+func (mr *MonitorResponse) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddInt("data_len", len(mr.Data))
+	return nil
+}
+
 func DeserializeMonitorResponse(data [][]byte) (*MonitorResponse, error) {
 	if len(data) != 1 {
 		return nil, ErrInvalidDataLength
@@ -290,12 +371,19 @@ func DeserializeMonitorResponse(data [][]byte) (*MonitorResponse, error) {
 
 type FunctionRequest struct {
 	Type            FunctionRequestType
-	FunctionID      string
+	FunctionID      uuid.UUID
 	FunctionContent []byte
 }
 
 func (fr *FunctionRequest) Serialize() [][]byte {
-	return [][]byte{[]byte(fr.Type), []byte(fr.FunctionID), fr.FunctionContent}
+	return [][]byte{[]byte(fr.Type), []byte(hex.EncodeToString(fr.FunctionID[:])), fr.FunctionContent}
+}
+
+func (fr *FunctionRequest) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("type", fr.Type.String())
+	enc.AddString("function_id", fr.FunctionID.String())
+	enc.AddInt("function_content_len", len(fr.FunctionContent))
+	return nil
 }
 
 func DeserializeFunctionRequest(data [][]byte) (*FunctionRequest, error) {
@@ -307,21 +395,33 @@ func DeserializeFunctionRequest(data [][]byte) (*FunctionRequest, error) {
 		return nil, ErrInvalidEnum
 	}
 
+	functionID, err := uuid.ParseBytes(data[1])
+	if err != nil {
+		return nil, err
+	}
+
 	return &FunctionRequest{
 		Type:            FunctionRequestType(data[0]),
-		FunctionID:      string(data[1]),
+		FunctionID:      functionID,
 		FunctionContent: data[2],
 	}, nil
 }
 
 type FunctionResponse struct {
 	Status          FunctionResponseType
-	FunctionID      string
+	FunctionID      uuid.UUID
 	FunctionContent []byte
 }
 
 func (fr *FunctionResponse) Serialize() [][]byte {
-	return [][]byte{[]byte(fr.Status), []byte(fr.FunctionID), fr.FunctionContent}
+	return [][]byte{[]byte(fr.Status), []byte(hex.EncodeToString(fr.FunctionID[:])), fr.FunctionContent}
+}
+
+func (fr *FunctionResponse) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("status", fr.Status.String())
+	enc.AddString("function_id", fr.FunctionID.String())
+	enc.AddInt("function_content_len", len(fr.FunctionContent))
+	return nil
 }
 
 func DeserializeFunctionResponse(data [][]byte) (*FunctionResponse, error) {
@@ -333,9 +433,14 @@ func DeserializeFunctionResponse(data [][]byte) (*FunctionResponse, error) {
 		return nil, ErrInvalidEnum
 	}
 
+	functionID, err := uuid.ParseBytes(data[1])
+	if err != nil {
+		return nil, err
+	}
+
 	return &FunctionResponse{
 		Status:          FunctionResponseType(data[0]),
-		FunctionID:      string(data[1]),
+		FunctionID:      functionID,
 		FunctionContent: data[2],
 	}, nil
 }

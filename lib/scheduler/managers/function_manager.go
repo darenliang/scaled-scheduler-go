@@ -3,7 +3,7 @@ package managers
 import (
 	"context"
 	"errors"
-	"github.com/go-zeromq/zmq4"
+	"github.com/google/uuid"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,16 +15,16 @@ import (
 )
 
 type FunctionManager struct {
-	router                 zmq4.Socket
+	router                 *protocol.Socket
 	sentStatistics         *utils.MessageTypeStatistics
 	functionRetention      time.Duration
-	functionIDToAliveSince cmap.ConcurrentMap[string, time.Time]
-	functionIDToFunction   cmap.ConcurrentMap[string, []byte]
-	functionIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
+	functionIDToAliveSince cmap.ConcurrentMap[uuid.UUID, time.Time]
+	functionIDToFunction   cmap.ConcurrentMap[uuid.UUID, []byte]
+	functionIDToTaskIDs    cmap.ConcurrentMap[uuid.UUID, cmap.ConcurrentMap[uuid.UUID, struct{}]]
 }
 
 func NewFunctionManager(
-	router zmq4.Socket,
+	router *protocol.Socket,
 	sentStatistics *utils.MessageTypeStatistics,
 	functionRetention time.Duration,
 ) *FunctionManager {
@@ -32,38 +32,38 @@ func NewFunctionManager(
 		router:                 router,
 		sentStatistics:         sentStatistics,
 		functionRetention:      functionRetention,
-		functionIDToAliveSince: cmap.New[time.Time](),
-		functionIDToFunction:   cmap.New[[]byte](),
-		functionIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
+		functionIDToAliveSince: cmap.NewStringer[uuid.UUID, time.Time](),
+		functionIDToFunction:   cmap.NewStringer[uuid.UUID, []byte](),
+		functionIDToTaskIDs:    cmap.NewStringer[uuid.UUID, cmap.ConcurrentMap[uuid.UUID, struct{}]](),
 	}
 }
 
 func (m *FunctionManager) GetStatistics() *utils.FunctionManagerStatistics {
-	functionIDToTasks := make(map[string]uint64)
-	m.functionIDToTaskIDs.IterCb(func(k string, v cmap.ConcurrentMap[string, struct{}]) {
+	functionIDToTasks := make(map[uuid.UUID]uint64)
+	m.functionIDToTaskIDs.IterCb(func(k uuid.UUID, v cmap.ConcurrentMap[uuid.UUID, struct{}]) {
 		functionIDToTasks[k] = uint64(v.Count())
 	})
 
 	return &utils.FunctionManagerStatistics{FunctionIDToTasks: functionIDToTasks}
 }
 
-func (m *FunctionManager) HasFunction(functionID string) bool {
+func (m *FunctionManager) HasFunction(functionID uuid.UUID) bool {
 	return m.functionIDToFunction.Has(functionID)
 }
 
-func (m *FunctionManager) AddFunction(functionID string, function []byte) error {
+func (m *FunctionManager) AddFunction(functionID uuid.UUID, function []byte) error {
 	m.functionIDToAliveSince.Set(functionID, time.Now())
 	if m.HasFunction(functionID) {
 		return protocol.ErrFunctionAlreadyExists
 	}
 
 	m.functionIDToFunction.Set(functionID, function)
-	m.functionIDToTaskIDs.Set(functionID, cmap.New[struct{}]())
+	m.functionIDToTaskIDs.Set(functionID, cmap.NewStringer[uuid.UUID, struct{}]())
 
 	return nil
 }
 
-func (m *FunctionManager) RemoveFunction(functionID string) error {
+func (m *FunctionManager) RemoveFunction(functionID uuid.UUID) error {
 	if !m.HasFunction(functionID) {
 		return protocol.ErrFunctionDoesNotExist
 	}
@@ -84,7 +84,7 @@ func (m *FunctionManager) RemoveFunction(functionID string) error {
 	return nil
 }
 
-func (m *FunctionManager) SetTaskUse(taskID, functionID string) error {
+func (m *FunctionManager) SetTaskUse(taskID, functionID uuid.UUID) error {
 	m.functionIDToAliveSince.Set(functionID, time.Now())
 
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
@@ -97,7 +97,7 @@ func (m *FunctionManager) SetTaskUse(taskID, functionID string) error {
 	return nil
 }
 
-func (m *FunctionManager) SetTaskDone(taskID, functionID string) error {
+func (m *FunctionManager) SetTaskDone(taskID, functionID uuid.UUID) error {
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
 
 	if !ok {
@@ -122,122 +122,115 @@ func (m *FunctionManager) HandleFunctionRequest(source string, request *protocol
 	}
 }
 
-func (m *FunctionManager) OnFunctionCheck(source, functionID string) {
-	logging.Logger.Debugf("received function check request from %s", source)
+func (m *FunctionManager) OnFunctionCheck(source string, functionID uuid.UUID) {
 	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
 
 	if m.HasFunction(functionID) {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeOK,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 		return
 	}
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeNotExists,
 			FunctionID:      functionID,
 			FunctionContent: make([]byte, 0),
-		})))
+		}))
 }
 
-func (m *FunctionManager) OnFunctionAdd(source, functionID string, function []byte) {
-	logging.Logger.Debugf("received function add request from %s", source)
+func (m *FunctionManager) OnFunctionAdd(source string, functionID uuid.UUID, function []byte) {
 	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
 
 	err := m.AddFunction(functionID, function)
 	if errors.Is(err, protocol.ErrFunctionAlreadyExists) {
-		logging.Logger.Debugf("function %s already exists", functionID)
 
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeDuplicated,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 
 		return
 	}
 
-	logging.Logger.Debugf("function %s added", functionID)
-
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,
 			FunctionID:      functionID,
 			FunctionContent: make([]byte, 0),
-		})))
+		}))
 }
 
-func (m *FunctionManager) OnFunctionRequest(source, functionID string) {
-	logging.Logger.Debugf("received function request from %s", source)
+func (m *FunctionManager) OnFunctionRequest(source string, functionID uuid.UUID) {
 	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
 
 	function, ok := m.functionIDToFunction.Get(functionID)
 	if !ok {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeNotExists,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 		return
 	}
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,
 			FunctionID:      functionID,
 			FunctionContent: function,
-		})))
+		}))
 }
 
-func (m *FunctionManager) OnFunctionDelete(source, functionID string) {
-	logging.Logger.Debugf("received function delete request from %s", source)
+func (m *FunctionManager) OnFunctionDelete(source string, functionID uuid.UUID) {
 	defer atomic.AddUint64(&m.sentStatistics.FunctionResponse, 1)
 
 	if !m.HasFunction(functionID) {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeNotExists,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 		return
 	}
 
 	taskIDs, ok := m.functionIDToTaskIDs.Get(functionID)
 	if !ok {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeNotExists,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 		return
 	}
 
 	if taskIDs.Count() > 0 {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 				Status:          protocol.FunctionResponseTypeStillHaveTask,
 				FunctionID:      functionID,
 				FunctionContent: make([]byte, 0),
-			})))
+			}))
 		return
 	}
 
 	m.RemoveFunction(functionID)
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		source, protocol.MessageTypeFunctionResponse, &protocol.FunctionResponse{
 			Status:          protocol.FunctionResponseTypeOK,
 			FunctionID:      functionID,
 			FunctionContent: make([]byte, 0),
-		})))
+		}))
 }
 
 func (m *FunctionManager) RunGC(ctx context.Context, wg *sync.WaitGroup) {
@@ -245,8 +238,8 @@ func (m *FunctionManager) RunGC(ctx context.Context, wg *sync.WaitGroup) {
 		select {
 		case <-time.After(utils.GCSweepInterval):
 			now := time.Now()
-			deadFunctionIDs := make([]string, 0)
-			m.functionIDToAliveSince.IterCb(func(functionID string, aliveSince time.Time) {
+			deadFunctionIDs := make([]uuid.UUID, 0)
+			m.functionIDToAliveSince.IterCb(func(functionID uuid.UUID, aliveSince time.Time) {
 				if now.Sub(aliveSince) > m.functionRetention {
 					deadFunctionIDs = append(deadFunctionIDs, functionID)
 				}

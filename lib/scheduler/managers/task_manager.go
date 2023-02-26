@@ -3,7 +3,8 @@ package managers
 import (
 	"context"
 	"github.com/darenliang/scaled-scheduler-go/lib/scheduler/utils"
-	"github.com/go-zeromq/zmq4"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"sync"
 	"sync/atomic"
 
@@ -18,28 +19,28 @@ type TaskQueueEntry struct {
 }
 
 type TaskManager struct {
-	router                    zmq4.Socket
+	router                    *protocol.Socket
 	sentStatistics            *utils.MessageTypeStatistics
 	functionManager           *FunctionManager
 	workerManager             *WorkerManager
-	taskIDToClientID          cmap.ConcurrentMap[string, string]
-	taskIDToTask              cmap.ConcurrentMap[string, *protocol.Task]
-	runningTaskIDs            cmap.ConcurrentMap[string, struct{}]
-	cancelingTaskIDs          cmap.ConcurrentMap[string, struct{}]
+	taskIDToClientID          cmap.ConcurrentMap[uuid.UUID, string]
+	taskIDToTask              cmap.ConcurrentMap[uuid.UUID, *protocol.Task]
+	runningTaskIDs            cmap.ConcurrentMap[uuid.UUID, struct{}]
+	cancelingTaskIDs          cmap.ConcurrentMap[uuid.UUID, struct{}]
 	unassignedTaskQueue       chan *TaskQueueEntry
 	unassignedTaskQueueLength uint64
 	failedTaskCount           uint64
 	canceledTaskCount         uint64
 }
 
-func NewTaskManager(router zmq4.Socket, sentStatistics *utils.MessageTypeStatistics) *TaskManager {
+func NewTaskManager(router *protocol.Socket, sentStatistics *utils.MessageTypeStatistics) *TaskManager {
 	return &TaskManager{
 		router:              router,
 		sentStatistics:      sentStatistics,
-		taskIDToClientID:    cmap.New[string](),
-		taskIDToTask:        cmap.New[*protocol.Task](),
-		runningTaskIDs:      cmap.New[struct{}](),
-		cancelingTaskIDs:    cmap.New[struct{}](),
+		taskIDToClientID:    cmap.NewStringer[uuid.UUID, string](),
+		taskIDToTask:        cmap.NewStringer[uuid.UUID, *protocol.Task](),
+		runningTaskIDs:      cmap.NewStringer[uuid.UUID, struct{}](),
+		cancelingTaskIDs:    cmap.NewStringer[uuid.UUID, struct{}](),
 		unassignedTaskQueue: make(chan *TaskQueueEntry),
 	}
 }
@@ -66,19 +67,19 @@ func (m *TaskManager) OnTaskNew(clientID string, task *protocol.Task) error {
 	defer atomic.AddUint64(&m.sentStatistics.TaskEcho, 1)
 
 	if !m.functionManager.HasFunction(task.FunctionID) {
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			clientID, protocol.MessageTypeTaskEcho, &protocol.TaskEcho{
 				TaskID: task.TaskID,
 				Status: protocol.TaskEchoStatusFunctionNotExists,
-			})))
+			}))
 		return nil
 	}
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		clientID, protocol.MessageTypeTaskEcho, &protocol.TaskEcho{
 			TaskID: task.TaskID,
 			Status: protocol.TaskEchoStatusSubmitOK,
-		})))
+		}))
 
 	err := m.functionManager.SetTaskUse(task.TaskID, task.FunctionID)
 	if err != nil {
@@ -91,7 +92,7 @@ func (m *TaskManager) OnTaskNew(clientID string, task *protocol.Task) error {
 	return nil
 }
 
-func (m *TaskManager) OnTaskReroute(taskID string) error {
+func (m *TaskManager) OnTaskReroute(taskID uuid.UUID) error {
 	clientID, ok := m.taskIDToClientID.Pop(taskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
@@ -110,27 +111,27 @@ func (m *TaskManager) OnTaskReroute(taskID string) error {
 	return nil
 }
 
-func (m *TaskManager) OnTaskCancel(clientID, taskID string) error {
+func (m *TaskManager) OnTaskCancel(clientID string, taskID uuid.UUID) error {
 	defer atomic.AddUint64(&m.sentStatistics.TaskCancelEcho, 1)
 
 	if m.cancelingTaskIDs.Has(taskID) {
 		logging.Logger.Warnf("task %s is already being canceled", taskID)
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 				TaskID: taskID,
 				Status: protocol.TaskEchoStatusDuplicated,
-			})))
+			}))
 
 		return nil
 	}
 
 	if !m.runningTaskIDs.Has(taskID) {
 		logging.Logger.Warnf("task %s is not running", taskID)
-		logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+		logging.CheckError(m.router.Send(
 			clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 				TaskID: taskID,
 				Status: protocol.TaskEchoStatusDuplicated,
-			})))
+			}))
 
 		return nil
 	}
@@ -138,11 +139,11 @@ func (m *TaskManager) OnTaskCancel(clientID, taskID string) error {
 	m.cancelingTaskIDs.Set(taskID, struct{}{})
 	m.runningTaskIDs.Remove(taskID)
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(m.router.Send(
 		clientID, protocol.MessageTypeTaskCancelEcho, &protocol.TaskCancelEcho{
 			TaskID: taskID,
 			Status: protocol.TaskEchoStatusCancelOK,
-		})))
+		}))
 
 	err := m.workerManager.OnTaskCancel(taskID)
 	if err != nil {
@@ -166,7 +167,10 @@ func (m *TaskManager) OnTaskDone(result *protocol.TaskResult) error {
 }
 
 func (m *TaskManager) OnAssignTask(ctx context.Context, entry *TaskQueueEntry) error {
-	logging.Logger.Debugf("assigning task %s to a worker", entry.Task.TaskID)
+	logging.Logger.Debugw("assigning task",
+		"client_id", entry.ClientID,
+		zap.Object("task", entry.Task),
+	)
 
 	m.taskIDToClientID.Set(entry.Task.TaskID, entry.ClientID)
 	m.taskIDToTask.Set(entry.Task.TaskID, entry.Task)
@@ -184,8 +188,6 @@ func (m *TaskManager) OnAssignTask(ctx context.Context, entry *TaskQueueEntry) e
 }
 
 func (m *TaskManager) OnTaskSuccess(result *protocol.TaskResult) error {
-	logging.Logger.Debugf("task %s successfully finished", result.TaskID)
-
 	_, ok := m.runningTaskIDs.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
@@ -201,7 +203,7 @@ func (m *TaskManager) OnTaskSuccess(result *protocol.TaskResult) error {
 		return protocol.ErrTaskNotFound
 	}
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
+	logging.CheckError(m.router.Send(clientID, protocol.MessageTypeTaskResult, result))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
@@ -213,8 +215,6 @@ func (m *TaskManager) OnTaskSuccess(result *protocol.TaskResult) error {
 }
 
 func (m *TaskManager) OnTaskFailed(result *protocol.TaskResult) error {
-	logging.Logger.Debugf("task %s failed", result.TaskID)
-
 	_, ok := m.runningTaskIDs.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
@@ -232,7 +232,7 @@ func (m *TaskManager) OnTaskFailed(result *protocol.TaskResult) error {
 
 	atomic.AddUint64(&m.failedTaskCount, 1)
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
+	logging.CheckError(m.router.Send(clientID, protocol.MessageTypeTaskResult, result))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)
@@ -244,8 +244,6 @@ func (m *TaskManager) OnTaskFailed(result *protocol.TaskResult) error {
 }
 
 func (m *TaskManager) OnTaskCanceled(result *protocol.TaskResult) error {
-	logging.Logger.Debugf("task %s is canceled", result.TaskID)
-
 	_, ok := m.cancelingTaskIDs.Pop(result.TaskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
@@ -263,7 +261,7 @@ func (m *TaskManager) OnTaskCanceled(result *protocol.TaskResult) error {
 
 	atomic.AddUint64(&m.canceledTaskCount, 1)
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(clientID, protocol.MessageTypeTaskResult, result)))
+	logging.CheckError(m.router.Send(clientID, protocol.MessageTypeTaskResult, result))
 	atomic.AddUint64(&m.sentStatistics.TaskResult, 1)
 
 	err := m.functionManager.SetTaskDone(task.TaskID, task.FunctionID)

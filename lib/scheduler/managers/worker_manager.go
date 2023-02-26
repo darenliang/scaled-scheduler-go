@@ -3,7 +3,7 @@ package managers
 import (
 	"container/heap"
 	"context"
-	"github.com/go-zeromq/zmq4"
+	"github.com/google/uuid"
 	"github.com/marusama/semaphore/v2"
 	"sync"
 	"sync/atomic"
@@ -16,21 +16,21 @@ import (
 )
 
 type WorkerManager struct {
-	router               zmq4.Socket
+	router               *protocol.Socket
 	sentStatistics       *utils.MessageTypeStatistics
 	perWorkerQueueSize   int
 	workerTimeout        time.Duration
 	taskManager          *TaskManager
 	workerIDToAliveSince cmap.ConcurrentMap[string, time.Time]
-	workerIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[string, struct{}]]
-	taskIDToWorkerID     cmap.ConcurrentMap[string, string]
+	workerIDToTaskIDs    cmap.ConcurrentMap[string, cmap.ConcurrentMap[uuid.UUID, struct{}]]
+	taskIDToWorkerID     cmap.ConcurrentMap[uuid.UUID, string]
 	workerQueue          *utils.WorkerHeap
 	workerQueueLock      sync.Mutex
 	workerQueueSemaphore semaphore.Semaphore
 }
 
 func NewWorkerManager(
-	router zmq4.Socket,
+	router *protocol.Socket,
 	sentStatistics *utils.MessageTypeStatistics,
 	perWorkerQueueSize int,
 	workerTimeout time.Duration,
@@ -41,8 +41,8 @@ func NewWorkerManager(
 		perWorkerQueueSize:   perWorkerQueueSize,
 		workerTimeout:        workerTimeout,
 		workerIDToAliveSince: cmap.New[time.Time](),
-		workerIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[string, struct{}]](),
-		taskIDToWorkerID:     cmap.New[string](),
+		workerIDToTaskIDs:    cmap.New[cmap.ConcurrentMap[uuid.UUID, struct{}]](),
+		taskIDToWorkerID:     cmap.NewStringer[uuid.UUID, string](),
 		workerQueue:          utils.NewWorkerHeap(),
 		workerQueueSemaphore: semaphore.New(0),
 	}
@@ -50,7 +50,7 @@ func NewWorkerManager(
 
 func (m *WorkerManager) GetStatistics() *utils.WorkerManagerStatistics {
 	workerToTasks := make(map[string]uint64)
-	m.workerIDToTaskIDs.IterCb(func(k string, v cmap.ConcurrentMap[string, struct{}]) {
+	m.workerIDToTaskIDs.IterCb(func(k string, v cmap.ConcurrentMap[uuid.UUID, struct{}]) {
 		workerToTasks[k] = uint64(v.Count())
 	})
 	return &utils.WorkerManagerStatistics{
@@ -70,7 +70,7 @@ func (m *WorkerManager) OnHeartbeat(workerID string) {
 		func(exist bool, _, newValue time.Time) time.Time {
 			if !exist {
 				logging.Logger.Infof("worker %s connected", workerID)
-				m.workerIDToTaskIDs.Set(workerID, cmap.New[struct{}]())
+				m.workerIDToTaskIDs.Set(workerID, cmap.NewStringer[uuid.UUID, struct{}]())
 				m.workerQueueLock.Lock()
 				heap.Push(m.workerQueue, &utils.WorkerHeapEntry{WorkerID: workerID, Tasks: 0})
 				m.workerQueueSemaphore.SetLimit(m.workerQueue.Len() * m.perWorkerQueueSize)
@@ -113,19 +113,19 @@ func (m *WorkerManager) OnAssignTask(ctx context.Context, task *protocol.Task) e
 	taskIDs.Set(task.TaskID, struct{}{})
 
 	m.taskIDToWorkerID.Set(task.TaskID, workerID)
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(workerID, protocol.MessageTypeTask, task)))
+	logging.CheckError(m.router.Send(workerID, protocol.MessageTypeTask, task))
 	atomic.AddUint64(&m.sentStatistics.Task, 1)
 
 	return nil
 }
 
-func (m *WorkerManager) OnTaskCancel(taskID string) error {
+func (m *WorkerManager) OnTaskCancel(taskID uuid.UUID) error {
 	workerID, ok := m.taskIDToWorkerID.Get(taskID)
 	if !ok {
 		return protocol.ErrTaskNotFound
 	}
 
-	logging.CheckError(m.router.SendMulti(protocol.PackMessage(workerID, protocol.MessageTypeTaskCancel, &protocol.TaskCancel{TaskID: taskID})))
+	logging.CheckError(m.router.Send(workerID, protocol.MessageTypeTaskCancel, &protocol.TaskCancel{TaskID: taskID}))
 	atomic.AddUint64(&m.sentStatistics.TaskCancel, 1)
 
 	return nil
@@ -182,7 +182,7 @@ func (m *WorkerManager) RunGC(ctx context.Context, wg *sync.WaitGroup) {
 
 				taskIDs, ok := m.workerIDToTaskIDs.Pop(workerID)
 				if ok {
-					taskIDs.IterCb(func(taskID string, _ struct{}) {
+					taskIDs.IterCb(func(taskID uuid.UUID, _ struct{}) {
 						m.taskIDToWorkerID.Remove(taskID)
 						m.taskManager.OnTaskReroute(taskID)
 					})

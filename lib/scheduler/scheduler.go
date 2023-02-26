@@ -27,7 +27,7 @@ type Scheduler struct {
 	ctx                   context.Context
 	wg                    *sync.WaitGroup
 	cancel                context.CancelFunc
-	router                zmq4.Socket
+	router                *protocol.Socket
 	clientManager         *managers.ClientManager
 	functionManager       *managers.FunctionManager
 	workerManager         *managers.WorkerManager
@@ -52,11 +52,12 @@ func NewScheduler(
 
 	// create router
 	identity := zmq4.SocketIdentity(fmt.Sprintf("S|%s|%d|%s", hostname, os.Getpid(), uuid.New().String()))
-	router := zmq4.NewRouter(ctx, zmq4.WithID(identity))
-	if err := router.Listen(address); err != nil {
+	socket := zmq4.NewRouter(ctx, zmq4.WithID(identity), zmq4.WithAutomaticReconnect(true))
+	if err := socket.Listen(address); err != nil {
 		cancel()
 		return nil, err
 	}
+	router := protocol.NewSocket(socket)
 
 	wg := &sync.WaitGroup{}
 
@@ -118,13 +119,13 @@ func (s *Scheduler) Run() {
 	}
 
 	for {
-		msg, err := s.router.Recv()
+		msg, err := s.router.ZmqSocket.Recv()
 
 		if err == context.Canceled {
 			s.cancel()
 			pool.Release()
 			s.wg.Wait()
-			s.router.Close()
+			s.router.ZmqSocket.Close()
 			logging.Logger.Info("scheduler exited")
 			return
 		}
@@ -169,14 +170,17 @@ func (s *Scheduler) HandleMessage(msg [][]byte) {
 }
 
 func (s *Scheduler) HandleHeartbeat(source string, payload [][]byte) {
-	logging.Logger.Debugf("received heartbeat from %s", source)
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeHeartbeat)
+
 	atomic.AddUint64(&s.receivedStatistics.Heartbeat, 1)
 	s.workerManager.OnHeartbeat(source)
 }
 
 func (s *Scheduler) HandleMonitoringRequest(source string, payload [][]byte) {
-	logging.Logger.Debugf("received monitoring request from %s", source)
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeMonitoringRequest)
+
 	atomic.AddUint64(&s.receivedStatistics.MonitoringRequest, 1)
+	defer atomic.AddUint64(&s.sentStatistics.MonitoringResponse, 1)
 
 	statistics := &utils.SchedulerStatistics{
 		Received:        s.receivedStatistics,
@@ -192,37 +196,24 @@ func (s *Scheduler) HandleMonitoringRequest(source string, payload [][]byte) {
 		return
 	}
 
-	if err := s.router.SendMulti(protocol.PackMessage(
+	logging.CheckError(s.router.Send(
 		source,
 		protocol.MessageTypeMonitoringResponse,
 		&protocol.MonitorResponse{Data: data},
-	)); err != nil {
-		logging.Logger.Error(err)
-		return
-	}
-
-	atomic.AddUint64(&s.sentStatistics.MonitoringResponse, 1)
-}
-
-func (s *Scheduler) HandleFunctionRequest(source string, payload [][]byte) {
-	logging.Logger.Debugf("received task cancel from %s", source)
-	atomic.AddUint64(&s.receivedStatistics.FunctionRequest, 1)
-	request, err := protocol.DeserializeFunctionRequest(payload)
-	if err != nil {
-		logging.Logger.Error(err)
-		return
-	}
-	s.functionManager.HandleFunctionRequest(source, request)
+	))
 }
 
 func (s *Scheduler) HandleTask(source string, payload [][]byte) {
-	logging.Logger.Debugf("received task from %s", source)
 	atomic.AddUint64(&s.receivedStatistics.Task, 1)
+
 	task, err := protocol.DeserializeTask(payload)
 	if err != nil {
 		logging.Logger.Error(err)
 		return
 	}
+
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeTask, task)
+
 	err = s.taskManager.OnTaskNew(source, task)
 	if err != nil {
 		logging.Logger.Error(err)
@@ -231,13 +222,16 @@ func (s *Scheduler) HandleTask(source string, payload [][]byte) {
 }
 
 func (s *Scheduler) HandleTaskCancel(source string, payload [][]byte) {
-	logging.Logger.Debugf("received task cancel from %s", source)
 	atomic.AddUint64(&s.receivedStatistics.TaskCancel, 1)
+
 	taskCancel, err := protocol.DeserializeTaskCancel(payload)
 	if err != nil {
 		logging.Logger.Error(err)
 		return
 	}
+
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeTaskCancel, taskCancel)
+
 	err = s.taskManager.OnTaskCancel(source, taskCancel.TaskID)
 	if err != nil {
 		logging.Logger.Error(err)
@@ -246,16 +240,33 @@ func (s *Scheduler) HandleTaskCancel(source string, payload [][]byte) {
 }
 
 func (s *Scheduler) HandleTaskResult(source string, payload [][]byte) {
-	logging.Logger.Debugf("received task result from %s", source)
 	atomic.AddUint64(&s.receivedStatistics.TaskResult, 1)
+
 	taskResult, err := protocol.DeserializeTaskResult(payload)
 	if err != nil {
 		logging.Logger.Error(err)
 		return
 	}
+
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeTaskResult, taskResult)
+
 	err = s.workerManager.OnTaskDone(taskResult)
 	if err != nil {
 		logging.Logger.Error(err)
 		return
 	}
+}
+
+func (s *Scheduler) HandleFunctionRequest(source string, payload [][]byte) {
+	atomic.AddUint64(&s.receivedStatistics.FunctionRequest, 1)
+
+	request, err := protocol.DeserializeFunctionRequest(payload)
+	if err != nil {
+		logging.Logger.Error(err)
+		return
+	}
+
+	logging.LogRecvProtocolMessage(source, protocol.MessageTypeFunctionRequest, request)
+
+	s.functionManager.HandleFunctionRequest(source, request)
 }
